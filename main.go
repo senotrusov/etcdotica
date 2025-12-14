@@ -29,9 +29,22 @@ import (
 	"time"
 )
 
+// stringArray implements flag.Value to handle repeated arguments
+type stringArray []string
+
+func (s *stringArray) String() string {
+	return strings.Join(*s, ", ")
+}
+
+func (s *stringArray) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
 // Config holds command line configuration
 type Config struct {
-	Watch bool
+	Watch   bool
+	BinDirs []string
 }
 
 // fileMeta stores metadata for change detection
@@ -47,8 +60,10 @@ var (
 )
 
 func main() {
-	// 1. Setup Flags (only watch)
+	// 1. Setup Flags
 	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
+	var binDirs stringArray
+	flag.Var(&binDirs, "bindir", "Directory relative to PWD where files must be executable (can be repeated)")
 	flag.Parse()
 
 	// 2. Capture Umask
@@ -76,7 +91,8 @@ func main() {
 	}
 
 	cfg := Config{
-		Watch: *watchFlag,
+		Watch:   *watchFlag,
+		BinDirs: binDirs,
 	}
 
 	// 4. Setup State File Path
@@ -93,6 +109,9 @@ func main() {
 	metaCache := make(map[string]fileMeta)
 
 	for {
+		// Ensure executable bits are set in specified bin directories before syncing
+		ensureExecBits(absSrc, cfg.BinDirs, processUmask)
+
 		// Perform Sync
 		newState, changed, err := runSync(absSrc, absDst, cfg, currentState, metaCache, processUmask)
 		if err != nil {
@@ -117,6 +136,71 @@ func main() {
 		}
 
 		time.Sleep(2 * time.Second)
+	}
+}
+
+// ensureExecBits iterates over provided directories and ensures files have
+// the correct executable bits set, respecting the process umask.
+func ensureExecBits(srcRoot string, binDirs []string, umask os.FileMode) {
+	if len(binDirs) == 0 {
+		return
+	}
+
+	// Calculate the executable bits we want to enforce.
+	// 0111 are the standard executable bits for User, Group, Other.
+	// We mask them with the inverse of the umask.
+	// Example: if umask is 077, ^umask masks out Group and Other, so we only enforce User exec (0100).
+	targetModeBits := os.FileMode(0111) & ^umask
+
+	for _, relDir := range binDirs {
+		absDir := filepath.Join(srcRoot, relDir)
+
+		// Check if the directory exists; if not, just skip it.
+		info, err := os.Stat(absDir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+
+		// Walk the directory to process files
+		err = filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				// Skip unreadable files/directories
+				return nil
+			}
+
+			// We only care about ensuring executable bits on files
+			if info.IsDir() {
+				return nil
+			}
+
+			// filepath.Walk uses Lstat. We use Stat here to follow symlinks.
+			// If a symlink exists in the binDir, we generally want the target to be executable.
+			realInfo, err := os.Stat(path)
+			if err != nil {
+				return nil
+			}
+
+			if realInfo.IsDir() {
+				return nil
+			}
+
+			currentMode := realInfo.Mode()
+
+			// Check if the required executable bits are present.
+			// (currentMode & targetModeBits) == targetModeBits implies all bits in targetModeBits are set.
+			if currentMode&targetModeBits != targetModeBits {
+				// We don't unset any bits; we only add the required ones.
+				newMode := currentMode | targetModeBits
+				if err := os.Chmod(path, newMode); err != nil {
+					logger.Printf("Warning: failed to set exec bit on %s: %v", path, err)
+				}
+			}
+			return nil
+		})
+
+		if err != nil {
+			logger.Printf("Warning: error scanning bindir %s: %v", absDir, err)
+		}
 	}
 }
 

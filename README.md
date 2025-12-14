@@ -8,6 +8,7 @@
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
 - **Pruning:** Automatically removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
 - **Permission Handling:** Applies the system `umask` to ensures files are copied with correct and secure permissions.
+- **Executable Enforcement:** Optionally scans specified directories (like `bin/`) and ensures all files within them have executable bits set before syncing, respecting system `umask`.
 - **Symlink Resolution:** Follows and resolves symlinks in the source directory before copying the actual content to the destination.
 - **Watch Mode:** Optionally watches the source directory for changes and syncs automatically.
 - **Clean:** Automatically ignores `.git` directories and its own state file.
@@ -44,6 +45,7 @@ To use `etcdotica`, navigate to your dotfiles directory (the source) and run the
 | Flag | Type | Description |
 | :--- | :--- | :--- |
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
+| `-bindir` | `string` | Specifies a directory relative to PWD where files must be executable. Can be repeated. |
 
 #### Examples
 
@@ -63,7 +65,15 @@ cd ~/my-dotfiles
 etcdotica -watch
 ```
 
-**3. State Tracking**
+**3. Executable Directories**
+Ensure all files in `bin/` and `scripts/` have executable permissions set before syncing:
+
+```bash
+cd ~/my-dotfiles
+etcdotica -bindir .local/bin -bindir scripts
+```
+
+**4. State Tracking**
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your home directory if you remove them from your dotfiles repo.
 
 ### License
