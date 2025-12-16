@@ -62,8 +62,10 @@ var (
 func main() {
 	// 1. Setup Flags
 	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
+	srcFlag := flag.String("src", "", "Source directory (default: current working directory)")
+	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	var binDirs stringArray
-	flag.Var(&binDirs, "bindir", "Directory relative to PWD where files must be executable (can be repeated)")
+	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
 	flag.Parse()
 
 	// 2. Capture Umask
@@ -74,20 +76,38 @@ func main() {
 	processUmask := os.FileMode(sysMask)
 
 	// 3. Determine Source and Destination Paths
-	absSrc, err := os.Getwd()
-	if err != nil {
-		logger.Fatalf("Error getting current working directory: %v", err)
+	var absSrc string
+	var err error
+
+	if *srcFlag != "" {
+		absSrc, err = filepath.Abs(*srcFlag)
+		if err != nil {
+			logger.Fatalf("Error resolving source path: %v", err)
+		}
+	} else {
+		absSrc, err = os.Getwd()
+		if err != nil {
+			logger.Fatalf("Error getting current working directory: %v", err)
+		}
 	}
 
-	currentUser, err := user.Current()
-	if err != nil {
-		logger.Fatalf("Error getting current user info: %v", err)
-	}
-	isRoot := currentUser.Uid == "0"
+	var absDst string
+	if *dstFlag != "" {
+		absDst, err = filepath.Abs(*dstFlag)
+		if err != nil {
+			logger.Fatalf("Error resolving destination path: %v", err)
+		}
+	} else {
+		currentUser, err := user.Current()
+		if err != nil {
+			logger.Fatalf("Error getting current user info: %v", err)
+		}
+		isRoot := currentUser.Uid == "0"
 
-	absDst := currentUser.HomeDir
-	if isRoot {
-		absDst = "/"
+		absDst = currentUser.HomeDir
+		if isRoot {
+			absDst = "/"
+		}
 	}
 
 	cfg := Config{

@@ -1,10 +1,10 @@
 ## etcdotica
 
-**etcdotica** is a lightweight, zero-dependency tool written in Go to synchronize files from your current directory to your home directory. It is designed to make managing dotfiles simple, idempotent, and consistent.
+**etcdotica** is a lightweight, zero-dependency tool written in Go to synchronize files from a source directory (defaulting to your current directory) to a destination directory (defaulting to your home directory). It is designed to make managing dotfiles simple, idempotent, and consistent.
 
 ### 🚀 Features
 
-- **One-Way Synchronization:** Mirrors the current working directory to the current user's home directory (or `/` if running as root).
+- **One-Way Synchronization:** Mirrors the source directory to the destination directory. Defaults to syncing the current working directory to the current user's home directory (or `/` if running as root).
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
 - **Pruning:** Automatically removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
 - **Permission Handling:** Applies the system `umask` to ensures files are copied with correct and secure permissions.
@@ -38,19 +38,21 @@ go build
 
 ### 💡 Usage
 
-To use `etcdotica`, navigate to your dotfiles directory (the source) and run the binary. The program treats the current working directory as the source of truth.
+To use `etcdotica`, run the binary. By default, the program treats the current working directory as the source and your home directory as the destination. You can override these paths using flags.
 
 #### Options
 
 | Flag | Type | Description |
 | :--- | :--- | :--- |
+| `-src` | `string` | Source directory (default: current working directory). |
+| `-dst` | `string` | Destination directory (default: user home directory, or `/` if root). |
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
-| `-bindir` | `string` | Specifies a directory relative to PWD where files must be executable. Can be repeated. |
+| `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
 
 #### Examples
 
 **1. Standard Sync**
-Navigate to your dotfiles folder and apply changes once:
+Navigate to your dotfiles folder and apply changes once (syncs PWD to Home):
 
 ```bash
 cd ~/my-dotfiles
@@ -73,8 +75,15 @@ cd ~/my-dotfiles
 etcdotica -bindir .local/bin -bindir scripts
 ```
 
-**4. State Tracking**
-`etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your home directory if you remove them from your dotfiles repo.
+**4. Custom Source and Destination**
+Sync a specific configuration folder to a backup location:
+
+```bash
+etcdotica -src ./configs -dst /tmp/configs-backup
+```
+
+**5. State Tracking**
+`etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your destination directory if you remove them from your source.
 
 ### License
 
