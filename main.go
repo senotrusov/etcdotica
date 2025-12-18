@@ -301,7 +301,9 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 
 		// Handle Directory
 		if realInfo.IsDir() {
-			// Check for conflict: Dest exists and is a file
+			// Check for conflict: Dest exists and is a file.
+			// We use Stat to follow symlinks. If dst is a symlink to a directory,
+			// Stat returns IsDir() == true, and we allow it.
 			dstInfo, err := os.Stat(targetPath)
 			if err == nil && !dstInfo.IsDir() {
 				logger.Printf("Conflict: src is dir, dst is file. Skipping %s", targetPath)
@@ -309,6 +311,7 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 			}
 
 			// Create the directory if it doesn't exist.
+			// If it exists (even as a symlink to a dir), MkdirAll returns nil (success).
 			if err := os.MkdirAll(targetPath, expectedPerms); err != nil {
 				logger.Printf("Failed to create dir %s: %v", targetPath, err)
 				return nil
@@ -319,13 +322,27 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 		// Handle File
 		processedFiles[relPath] = true
 
-		dstInfo, err := os.Stat(targetPath)
+		// Use Lstat to check destination state so we can detect symlinks
+		dstInfo, err := os.Lstat(targetPath)
 		dstExists := err == nil
 
-		// Conflict Check: Dest exists and is a directory
-		if dstExists && dstInfo.IsDir() {
-			logger.Printf("Conflict: src is file, dst is dir. Skipping %s", targetPath)
-			return nil
+		if dstExists {
+			// If destination is a symlink, we must remove it.
+			// - If it links to a file: writing would overwrite the target (bad).
+			// - If it links to a dir: we want to replace it with the source file.
+			if dstInfo.Mode()&os.ModeSymlink != 0 {
+				if err := os.Remove(targetPath); err != nil {
+					logger.Printf("Error removing destination symlink %s: %v", targetPath, err)
+					return nil
+				}
+				// We treated the symlink as "invalid" state and removed it.
+				// Now we proceed as if the file does not exist.
+				dstExists = false
+			} else if dstInfo.IsDir() {
+				// Conflict Check: Dest exists and is a directory
+				logger.Printf("Conflict: src is file, dst is dir. Skipping %s", targetPath)
+				return nil
+			}
 		}
 
 		// Record state
