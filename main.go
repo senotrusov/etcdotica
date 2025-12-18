@@ -440,6 +440,11 @@ func loadState(path string) (map[string]struct{}, error) {
 	}
 	defer f.Close()
 
+	// Acquire a shared lock to allow concurrent reads but block during writes
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		return nil, err
+	}
+
 	state := make(map[string]struct{})
 	scanner := bufio.NewScanner(f)
 
@@ -456,11 +461,28 @@ func loadState(path string) (map[string]struct{}, error) {
 // saveState writes the relative source paths to the state file, one per line.
 // It sorts the keys to ensure deterministic output.
 func saveState(path string, state map[string]struct{}) error {
-	f, err := os.Create(path)
+	// Open with O_RDWR and O_CREATE to ensure existence and writeability,
+	// but avoid O_TRUNC here to prevent data loss before locking.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
+	// Acquire an exclusive lock to prevent concurrent writes or reads
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+
+	// Now that we have the lock, truncate the file to overwrite content
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+
+	// Ensure we are at the beginning of the file
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
+	}
 
 	// Sort keys to prevent random file changes
 	keys := make([]string, 0, len(state))
@@ -475,5 +497,7 @@ func saveState(path string, state map[string]struct{}) error {
 			return err
 		}
 	}
-	return nil
+
+	// Flush writes to stable storage
+	return f.Sync()
 }
