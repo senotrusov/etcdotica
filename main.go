@@ -24,6 +24,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -64,16 +65,28 @@ func main() {
 	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
 	srcFlag := flag.String("src", "", "Source directory (default: current working directory)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
+	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
 	flag.Parse()
 
-	// 2. Capture Umask
-	// syscall.Umask returns the old mask and sets the new one.
-	// We read it and immediately restore it.
-	sysMask := syscall.Umask(0)
-	syscall.Umask(sysMask)
-	processUmask := os.FileMode(sysMask)
+	// 2. Configure Umask
+	var processUmask os.FileMode
+	if *umaskFlag != "" {
+		val, err := strconv.ParseUint(*umaskFlag, 8, 32)
+		if err != nil {
+			logger.Fatalf("Error parsing umask flag: %v", err)
+		}
+		sysMask := int(val)
+		syscall.Umask(sysMask)
+		processUmask = os.FileMode(sysMask)
+	} else {
+		// syscall.Umask returns the old mask and sets the new one.
+		// We read it and immediately restore it.
+		sysMask := syscall.Umask(0)
+		syscall.Umask(sysMask)
+		processUmask = os.FileMode(sysMask)
+	}
 
 	// 3. Determine Source and Destination Paths
 	var absSrc string
