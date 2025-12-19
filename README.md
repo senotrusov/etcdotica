@@ -7,7 +7,7 @@
 - **One-Way Synchronization:** Mirrors the source directory to the destination directory. Defaults to syncing the current working directory to the current user's home directory (or `/` if running as root).
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
 - **Pruning:** Automatically removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
-- **Permission Handling:** Applies the system `umask` to ensures files are copied with correct and secure permissions.
+- **Permission Handling:** Applies the system (or provided) `umask` to ensure files are copied with correct and secure permissions. Can optionally enforce world-readability.
 - **Executable Enforcement:** Optionally scans specified directories (like `bin/`) and ensures all files within them have executable bits set before syncing, respecting system `umask`.
 - **Symlink Resolution:** Follows and resolves symlinks in the source directory before copying the actual content to the destination.
 - **Watch Mode:** Optionally watches the source directory for changes and syncs automatically.
@@ -87,6 +87,8 @@ To use `etcdotica`, run the binary. By default, the program treats the current w
 | `-dst` | `string` | Destination directory (default: user home directory, or `/` if root). |
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
 | `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
+| `-umask` | `string` | Set process umask (octal, e.g. `022`). |
+| `-everyone` | `bool` | Set permissions to world-readable (and executable if user-executable), disregarding source group/other bits. |
 
 #### Examples
 
@@ -121,7 +123,14 @@ Sync a specific configuration folder to a backup location:
 etcdotica -src ./configs -dst /tmp/configs-backup
 ```
 
-**5. State Tracking**
+**5. System Configuration (Root)**
+Sync configurations to `/etc` ensuring they are readable by all users:
+
+```bash
+sudo etcdotica -src ./etc-files -dst /etc -everyone
+```
+
+**6. State Tracking**
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your destination directory if you remove them from your source.
 
 ### License

@@ -44,8 +44,9 @@ func (s *stringArray) Set(value string) error {
 
 // Config holds command line configuration
 type Config struct {
-	Watch   bool
-	BinDirs []string
+	Watch    bool
+	BinDirs  []string
+	Everyone bool
 }
 
 // fileMeta stores metadata for change detection
@@ -66,6 +67,7 @@ func main() {
 	srcFlag := flag.String("src", "", "Source directory (default: current working directory)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
+	everyoneFlag := flag.Bool("everyone", false, "Set permissions to world-readable (and executable if user-executable), disregarding source group/other bits")
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
 	flag.Parse()
@@ -124,8 +126,9 @@ func main() {
 	}
 
 	cfg := Config{
-		Watch:   *watchFlag,
-		BinDirs: binDirs,
+		Watch:    *watchFlag,
+		BinDirs:  binDirs,
+		Everyone: *everyoneFlag,
 	}
 
 	// 4. Setup State File Path
@@ -309,8 +312,28 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 			metaCache[path] = currentMeta
 		}
 
-		// Calculate the expected permissions by masking source perms with umask
-		expectedPerms := currentMeta.Mode.Perm() & ^umask
+		// Calculate the expected permissions
+		var expectedPerms os.FileMode
+		if cfg.Everyone {
+			// Start with base read for everyone (0444)
+			permBits := os.FileMode(0444)
+
+			// If source has User Write (0200), add User Write
+			if currentMeta.Mode&0200 != 0 {
+				permBits |= 0200
+			}
+
+			// If source has User Exec (0100), add Exec for User, Group, Other (0111)
+			if currentMeta.Mode&0100 != 0 {
+				permBits |= 0111
+			}
+
+			// Apply umask
+			expectedPerms = permBits & ^umask
+		} else {
+			// Standard behavior: mask source perms with umask
+			expectedPerms = currentMeta.Mode.Perm() & ^umask
+		}
 
 		// Handle Directory
 		if realInfo.IsDir() {
@@ -387,7 +410,7 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 		}
 
 		// 3. Content matches: Check Permissions
-		// If the destination permissions differ from (Source & ^Umask), sync them.
+		// If the destination permissions differ from expected, sync them.
 		if dstInfo.Mode().Perm() != expectedPerms {
 			if err := os.Chmod(targetPath, expectedPerms); err != nil {
 				logger.Printf("Warning: failed to chmod %s: %v", targetPath, err)
