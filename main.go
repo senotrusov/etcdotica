@@ -527,6 +527,21 @@ func saveState(path string, state map[string]struct{}) error {
 		return err
 	}
 
+	// If running as root, attempt to match the file ownership to the parent directory.
+	// This ensures that if sudo is used to run the tool, the state file remains
+	// owned by the user who owns the source directory, keeping it readable/writable
+	// for them in the future.
+	if os.Getuid() == 0 {
+		dir := filepath.Dir(path)
+		if info, err := os.Stat(dir); err == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+				// Best-effort attempt to change ownership. We ignore errors
+				// (e.g. filesystem quirks) to avoid blocking the sync operation.
+				_ = f.Chown(int(stat.Uid), int(stat.Gid))
+			}
+		}
+	}
+
 	// Now that we have the lock, truncate the file to overwrite content
 	if err := f.Truncate(0); err != nil {
 		return err
