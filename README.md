@@ -6,6 +6,7 @@
 
 - **One-Way Synchronization:** Mirrors the source directory to the destination directory. Defaults to syncing the current working directory to the current user's home directory (or `/` if running as root).
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
+- **Managed Sections:** Merge content into existing files instead of overwriting them, using sections.
 - **Pruning:** Automatically removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
 - **Permission Handling:** Applies the system (or provided) `umask` to ensure files are copied with correct and secure permissions. Can optionally enforce world-readability.
 - **Executable Enforcement:** Optionally scans specified directories (like `bin/`) and ensures all files within them have executable bits set before syncing, respecting system `umask`.
@@ -133,12 +134,44 @@ sudo etcdotica -src ./etc-files -dst /etc -everyone
 **6. State Tracking**
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your destination directory if you remove them from your source.
 
+### 🧩 Managed Sections
+
+`etcdotica` supports a special "section" mode that allows you to manage parts of a file without owning the entire file. This is useful for shared system files like `/etc/fstab` or `/etc/hosts`.
+
+#### Naming Convention
+
+To use this feature, name your source file using the pattern: `filename.{section-name}-section`.
+
+**Example:**
+
+- Source: `etc/fstab.external-disks-section`
+- Target: `etc/fstab`
+- Section Name: `external-disks`
+
+#### How it works
+
+The content of the source file is wrapped in `# BEGIN` and `# END` markers and inserted into the target file.
+
+1. **Alphabetical Sorting:** If multiple sections exist in the target file, `etcdotica` sorts them alphabetically by their section name.
+1. **Insertion Rules:**
+   - If a section with the same name already exists, its content is replaced.
+   - If no sections exist, the new section is appended to the end of the file.
+   - If other sections exist, the new section is inserted in its correct alphabetical position relative to other blocks.
+1. **Preservation:** All text outside of `# BEGIN` / `# END` blocks is preserved exactly as it is.
+
+#### Safety and Validation
+
+To prevent data loss or corruption, `etcdotica` performs safety checks on the destination file:
+
+- **Orphaned Tags:** If the target file contains a `# BEGIN` or `# END` tag that matches your section name but is missing its counterpart (e.g., a start tag with no end tag), **`etcdotica` will stop and refuse to modify the file**.
+- **Unrelated Tags:** Malformed tags for sections with *different* names are ignored and treated as raw text to avoid interference with existing file content.
+
 ### 🔗 Symlink Behavior at Destination
 
 To ensure safety and predictability, `etcdotica` follows specific rules when it encounters an existing symlink at the destination path:
 
-* **For Files:** If the source is a regular file but the destination is a symlink, `etcdotica` will **remove the symlink** and replace it with a standard file. This is a safety feature: it prevents the tool from accidentally overwriting the *contents* of a file located elsewhere on your system that the symlink might be pointing to.
-* **For Directories:** If a destination path is a symlink that points to an existing directory, `etcdotica` will **preserve the symlink** and sync the source contents into the directory it points to. This allows you to transparently redirect entire configuration folders (such as symlinking `~/.config/app` to a different drive) while still allowing `etcdotica` to manage the files inside.
+- **For Files:** If the source is a regular file but the destination is a symlink, `etcdotica` will **remove the symlink** and replace it with a standard file. This is a safety feature: it prevents the tool from accidentally overwriting the *contents* of a file located elsewhere on your system that the symlink might be pointing to.
+- **For Directories:** If a destination path is a symlink that points to an existing directory, `etcdotica` will **preserve the symlink** and sync the source contents into the directory it points to. This allows you to transparently redirect entire configuration folders (such as symlinking `~/.config/app` to a different drive) while still allowing `etcdotica` to manage the files inside.
 
 **Pruning Safety:** When the tool identifies an orphaned file at the destination that needs to be removed (because it no longer exists in the source), it uses a safe removal method. If that orphaned file is a symlink, only the symlink pointer itself is deleted; the file or directory it was pointing to remains untouched.
 
@@ -146,9 +179,9 @@ To ensure safety and predictability, `etcdotica` follows specific rules when it 
 
 `etcdotica` writes directly to destination files instead of using a "write-to-temp and rename" strategy. This design prioritizes three factors:
 
-* **Avoiding Race Conditions:** Many directories are automatically scanned for configuration files. While some services use filters to ignore temporary files, this behavior is not universal. Direct writes ensure no auxiliary files are ever created, eliminating the risk of a service "double-loading" unintended configuration.
-* **Stable Inodes:** Writing in-place keeps the file's Inode constant. This preserves existing hardlinks and ensures active system watches (like `inotify`) remain attached to the file.
-* **Architectural Simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writeable location for these transients across varying mount points adds significant complexity that falls outside the scope of this tool.
+- **Avoiding Race Conditions:** Many directories are automatically scanned for configuration files. While some services use filters to ignore temporary files, this behavior is not universal. Direct writes ensure no auxiliary files are ever created, eliminating the risk of a service "double-loading" unintended configuration.
+- **Stable Inodes:** Writing in-place keeps the file's Inode constant. This preserves existing hardlinks and ensures active system watches (like `inotify`) remain attached to the file.
+- **Architectural Simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writeable location for these transients across varying mount points adds significant complexity that falls outside the scope of this tool.
 
 **The Trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a **partially written** file. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
 

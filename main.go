@@ -16,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +61,17 @@ type fileMeta struct {
 // Global logger setup
 var (
 	logger = log.New(os.Stderr, "", 0) // No timestamp, plain output to stderr
+)
+
+// Regex for detecting section files: e.g. "etc/fstab.external-disks-section"
+// Group 1: Target base path ("etc/fstab")
+// Group 2: Section name ("external-disks")
+var sectionFileRx = regexp.MustCompile(`^(.+)\.([^./]+)-section$`)
+
+// Regex for detecting section markers in content
+var (
+	beginSectionRx = regexp.MustCompile(`^# BEGIN (.+)$`)
+	endSectionRx   = regexp.MustCompile(`^# END (.+)$`)
 )
 
 func main() {
@@ -295,7 +308,47 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 			Mode:    realInfo.Mode(),
 		}
 
-		// Watch optimization: skip if metadata hasn't changed
+		// Check if this is a Special Section File
+		if !realInfo.IsDir() {
+			sectionMatch := sectionFileRx.FindStringSubmatch(relPath)
+			if sectionMatch != nil {
+				// It is a section file.
+				// Group 1 is the target relative path (e.g. "etc/fstab")
+				// Group 2 is the section name (e.g. "external-disks")
+				targetRelPath := sectionMatch[1]
+				sectionName := sectionMatch[2]
+				targetAbsPath := filepath.Join(dst, targetRelPath)
+
+				// We treat the section source file as "processed" so it is not pruned,
+				// but we do NOT copy it as a file to the destination.
+				// Instead, we merge its content into the target file.
+				newState[relPath] = struct{}{}
+				processedFiles[relPath] = true
+
+				// Watch optimization for section files
+				if cfg.Watch {
+					lastMeta, known := metaCache[path]
+					if known &&
+						lastMeta.ModTime.Equal(currentMeta.ModTime) &&
+						lastMeta.Size == currentMeta.Size &&
+						lastMeta.Mode == currentMeta.Mode {
+						return nil
+					}
+					metaCache[path] = currentMeta
+				}
+
+				// Perform the Merge
+				didChange, err := mergeSection(path, targetAbsPath, sectionName, realInfo, umask, cfg.Everyone)
+				if err != nil {
+					logger.Printf("Failed to merge section %s into %s: %v", sectionName, targetAbsPath, err)
+				} else if didChange {
+					changed = true
+				}
+				return nil
+			}
+		}
+
+		// Watch optimization for standard files: skip if metadata hasn't changed
 		if cfg.Watch {
 			lastMeta, known := metaCache[path]
 			if known &&
@@ -505,6 +558,301 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	}
 
 	return nil
+}
+
+// chunk represents a part of the file, either raw text or a named section.
+type chunk struct {
+	isSection bool
+	name      string // empty if raw text
+	lines     []string
+}
+
+// mergeSection reads the source section file and merges it into the target file.
+// It respects the alphabetical ordering of sections and safety checks for broken tags.
+func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, umask os.FileMode, everyone bool) (bool, error) {
+	// 1. Read the new section content from source
+	srcBytes, err := os.ReadFile(srcPath)
+	if err != nil {
+		return false, err
+	}
+	srcLines := strings.Split(string(srcBytes), "\n")
+	// Trim trailing empty line if resulting from split
+	if len(srcLines) > 0 && srcLines[len(srcLines)-1] == "" {
+		srcLines = srcLines[:len(srcLines)-1]
+	}
+
+	// 2. Determine Expected Permissions
+	// If the destination file exists, we want to preserve its current permissions
+	// (sanitized by umask). If it doesn't exist, we calculate permissions based
+	// on the source file and configuration, similar to runSync.
+	var expectedPerms os.FileMode
+
+	// We use os.Stat (follows symlinks) because if it's a symlink, we care about the target's mode.
+	dstInfo, err := os.Stat(dstPath)
+	if err == nil {
+		// Conflict Check: If destination exists and is a directory, we cannot merge into it.
+		if dstInfo.IsDir() {
+			return false, fmt.Errorf("conflict: target path %s is a directory", dstPath)
+		}
+		// Dest exists: Keep existing mode, but strip umask bits
+		expectedPerms = dstInfo.Mode().Perm() & ^umask
+	} else {
+		// Dest does not exist (or is broken link): Calculate from source
+		if everyone {
+			// Start with base read for everyone (0444)
+			permBits := os.FileMode(0444)
+
+			// If source has User Write (0200), add User Write
+			if srcInfo.Mode()&0200 != 0 {
+				permBits |= 0200
+			}
+
+			// If source has User Exec (0100), add Exec for User, Group, Other (0111)
+			if srcInfo.Mode()&0100 != 0 {
+				permBits |= 0111
+			}
+
+			// Apply umask
+			expectedPerms = permBits & ^umask
+		} else {
+			// Standard behavior: mask source perms with umask
+			expectedPerms = srcInfo.Mode().Perm() & ^umask
+		}
+	}
+
+	// 3. Open Destination File (Read/Write, Create if missing)
+	// We need to lock it to prevent race conditions.
+	// os.OpenFile uses expectedPerms only if the file is created.
+	f, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE, expectedPerms)
+	if err != nil {
+		// If failure is due to missing dir, try creating dir first
+		if os.IsNotExist(err) {
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0755 & ^umask); err != nil {
+				return false, err
+			}
+			f, err = os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE, expectedPerms)
+			if err != nil {
+				return false, err
+			}
+		} else {
+			return false, err
+		}
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return false, err
+	}
+
+	// 4. Read existing content
+	// ReadAll reads from current offset (0)
+	content, err := io.ReadAll(f)
+	if err != nil {
+		return false, err
+	}
+	oldLines := strings.Split(string(content), "\n")
+	// Handle case where file is empty or ends with newline
+	if len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+
+	// 5. Parse Blocks
+	blocks, err := parseBlocks(oldLines, sectionName)
+	if err != nil {
+		// If specific error (e.g. broken target section), we abort
+		return false, fmt.Errorf("parsing target file: %v", err)
+	}
+
+	// 6. Construct New Section Chunk
+	newSectionLines := make([]string, 0, len(srcLines)+2)
+	newSectionLines = append(newSectionLines, fmt.Sprintf("# BEGIN %s", sectionName))
+	newSectionLines = append(newSectionLines, srcLines...)
+	newSectionLines = append(newSectionLines, fmt.Sprintf("# END %s", sectionName))
+
+	newChunk := chunk{
+		isSection: true,
+		name:      sectionName,
+		lines:     newSectionLines,
+	}
+
+	// 7. Merge Logic
+	var newBlocks []chunk
+	inserted := false
+
+	// Strategy:
+	// Iterate through existing blocks.
+	// If we find our section -> Replace it.
+	// If we find a section strictly GREATER than ours -> Insert before it.
+	// If raw -> Keep.
+	for _, b := range blocks {
+		if inserted {
+			// Already inserted/replaced, just append the rest, skipping if it was the old version of our section
+			if b.isSection && b.name == sectionName {
+				continue
+			}
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+
+		if b.isSection {
+			if b.name == sectionName {
+				// Found existing section: Replace
+				newBlocks = append(newBlocks, newChunk)
+				inserted = true
+			} else if sectionName < b.name {
+				// Found a section that comes alphabetically AFTER ours.
+				// We must insert ours BEFORE this one.
+				newBlocks = append(newBlocks, newChunk)
+				newBlocks = append(newBlocks, b)
+				inserted = true
+			} else {
+				// Current section is smaller (before) ours. Keep looking.
+				newBlocks = append(newBlocks, b)
+			}
+		} else {
+			// Raw text block
+			newBlocks = append(newBlocks, b)
+		}
+	}
+
+	if !inserted {
+		// If we reached the end without inserting, append to the end
+		newBlocks = append(newBlocks, newChunk)
+	}
+
+	// 8. Serialize
+	var buf bytes.Buffer
+	for i, b := range newBlocks {
+		for _, line := range b.lines {
+			buf.WriteString(line)
+			buf.WriteByte('\n')
+		}
+		// Try to avoid excessive newlines between sections if raw blocks are empty,
+		// but typically we just reconstruct exactly what was there.
+		// The simple reconstruction above puts a newline after every line.
+		// NOTE: If the original file had no trailing newline, this adds one.
+		_ = i
+	}
+
+	// Check if content actually changed
+	newBytes := buf.Bytes()
+	contentChanged := !bytes.Equal(content, newBytes)
+
+	// 9. Write Back
+	if contentChanged {
+		if err := f.Truncate(0); err != nil {
+			return false, err
+		}
+		if _, err := f.Seek(0, 0); err != nil {
+			return false, err
+		}
+		if _, err := f.Write(newBytes); err != nil {
+			return false, err
+		}
+	}
+
+	// 10. Check and Sync Permissions
+	// Even if content matches, we must ensure permissions are correct (like runSync).
+	// We use f.Stat() and f.Chmod() which operate on the open file handle (and follow symlinks correctly).
+	// If dstPath is a symlink, f refers to the target file, so we chmod the target file.
+	currentStat, err := f.Stat()
+	if err == nil {
+		if currentStat.Mode().Perm() != expectedPerms {
+			if err := f.Chmod(expectedPerms); err != nil {
+				logger.Printf("Warning: failed to chmod %s: %v", dstPath, err)
+			} else {
+				// Mark as changed so state is saved
+				contentChanged = true
+			}
+		}
+	}
+
+	return contentChanged, nil
+}
+
+// parseBlocks reads lines and groups them into chunks (Raw vs Named Sections).
+// It validates that if the specific targetSectionName is present, it is well-formed.
+// Other malformed sections are treated as raw text to avoid destruction.
+func parseBlocks(lines []string, targetSectionName string) ([]chunk, error) {
+	var blocks []chunk
+
+	// Scan first to validate the target section isn't broken
+	// A broken target section (e.g. BEGIN X without END X) causes an abort.
+	// A broken unrelated section (e.g. BEGIN Y without END Y) is treated as raw text.
+	// To implement this, we identify valid ranges first.
+	type span struct {
+		start, end int // inclusive
+		name       string
+	}
+	validSections := []span{}
+
+	for i := 0; i < len(lines); i++ {
+		match := beginSectionRx.FindStringSubmatch(lines[i])
+		if match != nil {
+			name := match[1]
+			// Look ahead for END
+			foundEnd := -1
+			// Nested sections are not supported/expected, scan linearly
+			for j := i + 1; j < len(lines); j++ {
+				endMatch := endSectionRx.FindStringSubmatch(lines[j])
+				if endMatch != nil && endMatch[1] == name {
+					foundEnd = j
+					break
+				}
+				// If we see a BEGIN for the SAME name nested, that's definitely broken
+				beginMatch := beginSectionRx.FindStringSubmatch(lines[j])
+				if beginMatch != nil && beginMatch[1] == name {
+					break
+				}
+			}
+
+			if foundEnd != -1 {
+				validSections = append(validSections, span{i, foundEnd, name})
+				i = foundEnd // Advance outer loop
+			} else {
+				// Opening tag without closing tag
+				if name == targetSectionName {
+					return nil, fmt.Errorf("found opening tag for section '%s' at line %d but no closing tag", name, i+1)
+				}
+				// Treat as raw text
+			}
+		} else {
+			// Check for orphaned END tags of target
+			endMatch := endSectionRx.FindStringSubmatch(lines[i])
+			if endMatch != nil && endMatch[1] == targetSectionName {
+				return nil, fmt.Errorf("found orphaned closing tag for section '%s' at line %d", targetSectionName, i+1)
+			}
+		}
+	}
+
+	// Now build blocks based on valid sections
+	lineIdx := 0
+	for _, sec := range validSections {
+		// Add raw text before this section
+		if sec.start > lineIdx {
+			blocks = append(blocks, chunk{
+				isSection: false,
+				lines:     lines[lineIdx:sec.start],
+			})
+		}
+		// Add the section
+		blocks = append(blocks, chunk{
+			isSection: true,
+			name:      sec.name,
+			lines:     lines[sec.start : sec.end+1],
+		})
+		lineIdx = sec.end + 1
+	}
+
+	// Add remaining raw text
+	if lineIdx < len(lines) {
+		blocks = append(blocks, chunk{
+			isSection: false,
+			lines:     lines[lineIdx:],
+		})
+	}
+
+	return blocks, nil
 }
 
 // loadState reads the state file.
