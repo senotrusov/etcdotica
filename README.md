@@ -133,6 +133,25 @@ sudo etcdotica -src ./etc-files -dst /etc -everyone
 **6. State Tracking**
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your destination directory if you remove them from your source.
 
+### 🔗 Symlink Behavior at Destination
+
+To ensure safety and predictability, `etcdotica` follows specific rules when it encounters an existing symlink at the destination path:
+
+* **For Files:** If the source is a regular file but the destination is a symlink, `etcdotica` will **remove the symlink** and replace it with a standard file. This is a safety feature: it prevents the tool from accidentally overwriting the *contents* of a file located elsewhere on your system that the symlink might be pointing to.
+* **For Directories:** If a destination path is a symlink that points to an existing directory, `etcdotica` will **preserve the symlink** and sync the source contents into the directory it points to. This allows you to transparently redirect entire configuration folders (such as symlinking `~/.config/app` to a different drive) while still allowing `etcdotica` to manage the files inside.
+
+**Pruning Safety:** When the tool identifies an orphaned file at the destination that needs to be removed (because it no longer exists in the source), it uses a safe removal method. If that orphaned file is a symlink, only the symlink pointer itself is deleted; the file or directory it was pointing to remains untouched.
+
+### ⚠️ Direct Writes & Inode Stability
+
+`etcdotica` writes directly to destination files instead of using a "write-to-temp and rename" strategy. This design prioritizes three factors:
+
+* **Avoiding Race Conditions:** Many directories are automatically scanned for configuration files. While some services use filters to ignore temporary files, this behavior is not universal. Direct writes ensure no auxiliary files are ever created, eliminating the risk of a service "double-loading" unintended configuration.
+* **Stable Inodes:** Writing in-place keeps the file's Inode constant. This preserves existing hardlinks and ensures active system watches (like `inotify`) remain attached to the file.
+* **Architectural Simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writeable location for these transients across varying mount points adds significant complexity that falls outside the scope of this tool.
+
+**The Trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a **partially written** file. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
+
 ### License
 
 `etcdotica` is licensed under the [Apache License 2.0](LICENSE).
