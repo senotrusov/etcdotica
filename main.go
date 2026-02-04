@@ -448,6 +448,8 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 }
 
 // installFile copies content and forces the specific calculated permissions.
+// It acquires an exclusive lock on the destination file during the write operation
+// to prevent concurrent modifications.
 func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	s, err := os.Open(src)
 	if err != nil {
@@ -456,28 +458,48 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	defer s.Close()
 
 	// 1. Create/Write file.
-	// We use the calculated 'perm'. Note that OpenFile applies umask again on top of 'perm'
-	// if we are not careful, but since 'perm' is already (src & ^umask),
-	// applying umask again ((src & ^umask) & ^umask) is idempotent.
-	d, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	// We use O_WRONLY|O_CREATE but explicitly AVOID O_TRUNC here.
+	// If we used O_TRUNC, we might wipe the file while another process holds the lock
+	// but hasn't finished writing, or before we strictly own the lock.
+	d, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE, perm)
 	if err != nil {
 		return err
 	}
 
+	// 2. Acquire Exclusive Lock
+	// We must lock before we modify the content (truncate/write).
+	if err := syscall.Flock(int(d.Fd()), syscall.LOCK_EX); err != nil {
+		d.Close()
+		return err
+	}
+
+	// 3. Truncate
+	// Now that we possess the exclusive lock, it is safe to reset the file size.
+	if err := d.Truncate(0); err != nil {
+		d.Close()
+		return err
+	}
+
+	// 4. Copy Content
 	if _, err := io.Copy(d, s); err != nil {
 		d.Close()
 		return err
 	}
-	d.Close()
 
-	// 2. Sync Permissions
+	// 5. Close (Releases Lock)
+	// Explicitly closing allows us to check for write errors, and implicitly releases the flock.
+	if err := d.Close(); err != nil {
+		return err
+	}
+
+	// 6. Sync Permissions
 	// OpenFile only applies mode on creation. If the file existed, mode is ignored.
 	// We explicit chmod to the calculated permission to handle updates and ensure correctness.
 	if err := os.Chmod(dst, perm); err != nil {
 		logger.Printf("Warning: failed to chmod %s: %v", dst, err)
 	}
 
-	// 3. Sync Mtime
+	// 7. Sync Mtime
 	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
 		logger.Printf("Warning: failed to set mtime on %s: %v", dst, err)
 	}
