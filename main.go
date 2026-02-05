@@ -490,6 +490,24 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 	// Pruning
 	for oldRelPath := range oldState {
 		if !processedFiles[oldRelPath] {
+			// Check if this is a section file from the previous state
+			sectionMatch := sectionFileRx.FindStringSubmatch(oldRelPath)
+			if sectionMatch != nil {
+				// It was a section file. We need to remove the section from the target.
+				targetRelPath := sectionMatch[1]
+				sectionName := sectionMatch[2]
+				targetAbsPath := filepath.Join(dst, targetRelPath)
+
+				didChange, err := removeSection(targetAbsPath, sectionName)
+				if err != nil {
+					logger.Printf("Failed to remove section %s from %s: %v", sectionName, targetAbsPath, err)
+				} else if didChange {
+					changed = true
+				}
+				// We handled this entry (or failed to), so we skip the generic file removal
+				continue
+			}
+
 			targetPath := filepath.Join(dst, oldRelPath)
 
 			// Remove orphaned file. Do not remove directories.
@@ -773,6 +791,77 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 	}
 
 	return contentChanged, nil
+}
+
+// removeSection removes the named section from the target file.
+func removeSection(dstPath, sectionName string) (bool, error) {
+	// 1. Open File
+	f, err := os.OpenFile(dstPath, os.O_RDWR, 0666)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return false, err
+	}
+
+	// 2. Read Content
+	content, err := io.ReadAll(f)
+	if err != nil {
+		return false, err
+	}
+	lines := strings.Split(string(content), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// 3. Parse
+	blocks, err := parseBlocks(lines, sectionName)
+	if err != nil {
+		return false, fmt.Errorf("parsing target file: %v", err)
+	}
+
+	// 4. Filter
+	var newBlocks []chunk
+	found := false
+	for _, b := range blocks {
+		if b.isSection && b.name == sectionName {
+			found = true
+			continue
+		}
+		newBlocks = append(newBlocks, b)
+	}
+
+	if !found {
+		return false, nil
+	}
+
+	// 5. Serialize
+	var buf bytes.Buffer
+	for _, b := range newBlocks {
+		for _, line := range b.lines {
+			buf.WriteString(line)
+			buf.WriteByte('\n')
+		}
+	}
+
+	// 6. Write Back
+	newBytes := buf.Bytes()
+	if err := f.Truncate(0); err != nil {
+		return false, err
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return false, err
+	}
+	if _, err := f.Write(newBytes); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // parseBlocks reads lines and groups them into chunks (Raw vs Named Sections).
