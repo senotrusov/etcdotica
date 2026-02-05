@@ -46,9 +46,9 @@ func (s *stringArray) Set(value string) error {
 
 // Config holds command line configuration
 type Config struct {
-	Watch    bool
-	BinDirs  []string
-	Everyone bool
+	Watch   bool
+	BinDirs []string
+	Others  bool
 }
 
 // fileMeta stores metadata for change detection
@@ -80,7 +80,7 @@ func main() {
 	srcFlag := flag.String("src", "", "Source directory (default: current working directory)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
-	everyoneFlag := flag.Bool("everyone", false, "Set permissions to world-readable (and executable if user-executable), disregarding source group/other bits")
+	othersFlag := flag.Bool("others", false, "Set permissions to world-readable (readable by all local users, 0644), and world-executable (0755) if user-executable, disregarding the source file's group and other bits")
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
 	flag.Parse()
@@ -144,9 +144,9 @@ func main() {
 	}
 
 	cfg := Config{
-		Watch:    *watchFlag,
-		BinDirs:  binDirs,
-		Everyone: *everyoneFlag,
+		Watch:   *watchFlag,
+		BinDirs: binDirs,
+		Others:  *othersFlag,
 	}
 
 	// 4. Setup State File Path
@@ -343,7 +343,7 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 				}
 
 				// Perform the Merge
-				didChange, err := mergeSection(path, targetAbsPath, sectionName, realInfo, umask, cfg.Everyone)
+				didChange, err := mergeSection(path, targetAbsPath, sectionName, realInfo, umask, cfg.Others)
 				if err != nil {
 					logger.Printf("Failed to merge section %s into %s: %v", sectionName, targetAbsPath, err)
 				} else if didChange {
@@ -372,7 +372,7 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 
 		// Calculate the expected permissions
 		var expectedPerms os.FileMode
-		if cfg.Everyone {
+		if cfg.Others {
 			// Start with base read for everyone (0444)
 			permBits := os.FileMode(0444)
 
@@ -574,7 +574,7 @@ type chunk struct {
 
 // mergeSection reads the source section file and merges it into the target file.
 // It respects the alphabetical ordering of sections and safety checks for broken tags.
-func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, umask os.FileMode, everyone bool) (bool, error) {
+func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, umask os.FileMode, others bool) (bool, error) {
 	// 1. Read the new section content from source
 	srcBytes, err := os.ReadFile(srcPath)
 	if err != nil {
@@ -603,7 +603,7 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 		expectedPerms = dstInfo.Mode().Perm() & ^umask
 	} else {
 		// Dest does not exist (or is broken link): Calculate from source
-		if everyone {
+		if others {
 			// Start with base read for everyone (0444)
 			permBits := os.FileMode(0444)
 
