@@ -82,13 +82,19 @@ var (
 func main() {
 	// 1. Setup Flags
 	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
-	srcFlag := flag.String("src", "", "Source directory (default: current working directory)")
+	srcFlag := flag.String("src", "", "Source directory (required)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
 	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode.")
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
 	flag.Parse()
+
+	// Validation: src is required
+	if *srcFlag == "" {
+		flag.Usage()
+		logger.Fatalf("Error: -src argument is required")
+	}
 
 	// 2. Configure Umask
 	var processUmask os.FileMode
@@ -109,21 +115,23 @@ func main() {
 	}
 
 	// 3. Determine Source and Destination Paths
-	var absSrc string
-	var err error
-
-	if *srcFlag != "" {
-		absSrc, err = filepath.Abs(*srcFlag)
-		if err != nil {
-			logger.Fatalf("Error resolving source path: %v", err)
-		}
-	} else {
-		absSrc, err = os.Getwd()
-		if err != nil {
-			logger.Fatalf("Error getting current working directory: %v", err)
-		}
+	// Resolve Source Absolute Path
+	absSrc, err := filepath.Abs(*srcFlag)
+	if err != nil {
+		logger.Fatalf("Error resolving source path: %v", err)
 	}
 
+	// Initial validation: Source must exist and be a directory on startup.
+	// We only strictly require existence at start. Transient failures later (in watch mode) are handled in the loop.
+	srcInfo, err := os.Stat(absSrc)
+	if err != nil {
+		logger.Fatalf("Error accessing source directory %s: %v", absSrc, err)
+	}
+	if !srcInfo.IsDir() {
+		logger.Fatalf("Error: source path %s is not a directory", absSrc)
+	}
+
+	// Resolve Destination Absolute Path
 	var absDst string
 	if *dstFlag != "" {
 		absDst, err = filepath.Abs(*dstFlag)
@@ -141,6 +149,11 @@ func main() {
 		if isRoot {
 			absDst = "/"
 		}
+		// Ensure absolute path even for defaults
+		absDst, err = filepath.Abs(absDst)
+		if err != nil {
+			logger.Fatalf("Error resolving destination path: %v", err)
+		}
 	}
 
 	// Safety check: prevent operations where source and destination are the same
@@ -155,6 +168,7 @@ func main() {
 	}
 
 	// 4. Setup State File Path
+	// absSrc is absolute, so stateFilePath is absolute.
 	stateFilePath := filepath.Join(absSrc, ".etcdotica")
 
 	// 5. Run Loop
@@ -164,12 +178,14 @@ func main() {
 	for {
 		// Open the state file with read/write permissions. Create if it doesn't exist.
 		// We hold the file handle and lock throughout the entire sync process to prevent race conditions.
+		// If the source directory is transiently unavailable (e.g. network mount), this will fail.
 		stateFile, err := os.OpenFile(stateFilePath, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
 			logger.Printf("Error opening state file: %v", err)
 			if !cfg.Watch {
 				os.Exit(1)
 			}
+			// In watch mode, if source dir is missing/unreachable, wait and retry.
 			time.Sleep(watchRetryInterval)
 			continue
 		}

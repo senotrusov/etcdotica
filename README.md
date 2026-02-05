@@ -1,10 +1,10 @@
 ## etcdotica
 
-**etcdotica** is a lightweight, zero-dependency tool written in Go to synchronize files from a source directory (defaulting to your current directory) to a destination directory (defaulting to your home directory). It is designed to make managing dotfiles simple, idempotent, and consistent.
+**etcdotica** is a lightweight, zero-dependency tool written in Go to synchronize files from a source directory to a destination directory (defaulting to your home directory). It is designed to make managing dotfiles simple, idempotent, and consistent.
 
 ### 🚀 Features
 
-- **One-Way Synchronization:** Mirrors the source directory to the destination directory. Defaults to syncing the current working directory to the current user's home directory (or `/` if running as root).
+- **One-Way Synchronization:** Mirrors the source directory to the destination directory.
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
 - **Managed Sections:** Merge content into existing files instead of overwriting them, using sections.
 - **Automatic Pruning:** Removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
@@ -13,7 +13,7 @@
 - **Permission Handling:** Applies the system (or provided) `umask` to ensure files are copied with correct and secure permissions. Can optionally enforce world-readability.
 - **Executable Enforcement:** Optionally scans specified directories (like `bin/`) and ensures all files within them have executable bits set before syncing, respecting system `umask`.
 - **Symlink Resolution:** Follows and resolves symlinks in the source directory before copying the actual content to the destination.
-- **Watch Mode:** Optionally watches the source directory for changes and syncs automatically.
+- **Watch Mode:** Optionally watches the source directory for changes and syncs automatically. Handles transient unavailability of the source (e.g., if a mount point is temporarily disconnected).
 - **Clean:** Automatically ignores `.git` directories and its own state file.
 
 ### 📦 Installation
@@ -80,13 +80,13 @@ If your output matches the BuildID of an official release or a build from a coll
 
 ### 💡 Usage
 
-To use `etcdotica`, run the binary. By default, the program treats the current working directory as the source and your home directory as the destination. You can override these paths using flags.
+To use `etcdotica`, run the binary. You must specify the source directory using the `-src` flag. By default, the program treats your home directory as the destination.
 
 #### Options
 
 | Flag | Type | Description |
 | :--- | :--- | :--- |
-| `-src` | `string` | Source directory (default: current working directory). |
+| `-src` | `string` | **Required.** Source directory containing your files. |
 | `-dst` | `string` | Destination directory (default: user home directory, or `/` if root). |
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
 | `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
@@ -96,27 +96,24 @@ To use `etcdotica`, run the binary. By default, the program treats the current w
 #### Examples
 
 **1. Standard Sync**
-Navigate to your dotfiles folder and apply changes once (syncs PWD to Home):
+Apply changes from your dotfiles folder to your Home directory:
 
 ```bash
-cd ~/my-dotfiles
-etcdotica
+etcdotica -src ~/my-dotfiles
 ```
 
 **2. Watch Mode**
 Keep the program running to verify changes live while editing configurations:
 
 ```bash
-cd ~/my-dotfiles
-etcdotica -watch
+etcdotica -src ~/my-dotfiles -watch
 ```
 
 **3. Executable Directories**
 Ensure all files in `bin/` and `scripts/` have executable permissions set before syncing:
 
 ```bash
-cd ~/my-dotfiles
-etcdotica -bindir .local/bin -bindir scripts
+etcdotica -src ~/my-dotfiles -bindir .local/bin -bindir scripts
 ```
 
 **4. Custom Source and Destination**
@@ -183,13 +180,13 @@ To ensure safety and predictability, `etcdotica` follows specific rules when it 
 
 ### 🔒 Concurrency & Safety
 
-`etcdotica` is designed for robust operation in multi-tasking environments. It uses **advisory file locking** (`flock`) on the destination files, the section-managed files, and its own `.etcdotica` state file.
+`etcdotica` is designed for robust operation. It uses **advisory file locking** (`flock`) on the destination files, section-managed files, and its own `.etcdotica` state file.
 
 This means:
 
 - **Watch Mode + Manual Sync:** You can leave one instance running in `-watch` mode and manually trigger another sync without risk of data corruption or race conditions.
 - **Multiple Instances:** Multiple users or scripts can safely run `etcdotica` against the same destination or source simultaneously.
-- **Atomic-like Writes:** While it writes directly to files (to preserve Inodes and hardlinks), the exclusive lock ensures that no other process using standard locking will read a partially written file.
+- **Lock-guarded writes:** While it writes directly to files (to preserve Inodes and hardlinks), the exclusive lock ensures that no other process using standard locking will read a partially written file.
 
 ### ⚠️ Direct Writes & Inode Stability
 
@@ -200,6 +197,10 @@ This means:
 - **Architectural Simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writeable location for these transients across varying mount points adds significant complexity that falls outside the scope of this tool.
 
 **The Trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a **partially written** file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
+
+### Resilience & Fault Tolerance
+
+Beyond locking, the system is designed to handle environmental instability. If a source directory (such as a network drive) becomes unavailable during Watch Mode, etcdotica will not crash. Instead, it logs a warning and waits for the source to reappear before automatically resuming synchronization, provided the source was successfully located at least once during startup.
 
 ### License
 
