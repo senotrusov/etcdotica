@@ -6,3 +6,6 @@ static:
 
 local-install: static
   sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin etcdotica
+
+format:
+  mdformat README.md
