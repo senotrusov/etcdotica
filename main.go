@@ -152,17 +152,54 @@ func main() {
 	// 4. Setup State File Path
 	stateFilePath := filepath.Join(absSrc, ".etcdotica")
 
-	// 5. Initial State Load
-	currentState, err := loadState(stateFilePath)
-	if err != nil {
-		currentState = make(map[string]struct{})
-	}
-
-	// 6. Run Loop
+	// 5. Run Loop
 	// Cache stores metadata to detect changes in watch mode
 	metaCache := make(map[string]fileMeta)
 
 	for {
+		// Open the state file with read/write permissions. Create if it doesn't exist.
+		// We hold the file handle and lock throughout the entire sync process to prevent race conditions.
+		stateFile, err := os.OpenFile(stateFilePath, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			logger.Printf("Error opening state file: %v", err)
+			if !cfg.Watch {
+				os.Exit(1)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Acquire an exclusive lock immediately. This blocks until the lock is obtained.
+		if err := syscall.Flock(int(stateFile.Fd()), syscall.LOCK_EX); err != nil {
+			logger.Printf("Error locking state file: %v", err)
+			stateFile.Close()
+			if !cfg.Watch {
+				os.Exit(1)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Ensure correct ownership if running as root
+		ensureStateOwnership(stateFile, stateFilePath)
+
+		// Ensure we read from the beginning
+		if _, err := stateFile.Seek(0, 0); err != nil {
+			logger.Printf("Error seeking state file: %v", err)
+			stateFile.Close()
+			if !cfg.Watch {
+				os.Exit(1)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Load Current State
+		currentState, err := loadState(stateFile)
+		if err != nil {
+			currentState = make(map[string]struct{})
+		}
+
 		// Ensure executable bits are set in specified bin directories before syncing
 		ensureExecBits(absSrc, cfg.BinDirs, processUmask)
 
@@ -170,19 +207,18 @@ func main() {
 		newState, changed, err := runSync(absSrc, absDst, cfg, currentState, metaCache, processUmask)
 		if err != nil {
 			logger.Printf("Sync error: %v", err)
+			stateFile.Close() // Release lock
 			if !cfg.Watch {
 				os.Exit(1)
 			}
 		} else {
-			// Update in-memory state for the next iteration
-			currentState = newState
-
 			// Save State only if changes occurred
 			if changed {
-				if err := saveState(stateFilePath, currentState); err != nil {
+				if err := saveState(stateFile, newState); err != nil {
 					logger.Printf("Error saving state: %v", err)
 				}
 			}
+			stateFile.Close() // Release lock
 		}
 
 		if !cfg.Watch {
@@ -949,21 +985,11 @@ func parseBlocks(lines []string, targetSectionName string) ([]chunk, error) {
 	return blocks, nil
 }
 
-// loadState reads the state file.
-func loadState(path string) (map[string]struct{}, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	// Acquire a shared lock to allow concurrent reads but block during writes
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
-		return nil, err
-	}
-
+// loadState reads the state from the provided reader.
+// It expects the caller to handle file opening and locking.
+func loadState(r io.Reader) (map[string]struct{}, error) {
 	state := make(map[string]struct{})
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -975,43 +1001,15 @@ func loadState(path string) (map[string]struct{}, error) {
 	return state, scanner.Err()
 }
 
-// saveState writes the relative source paths to the state file, one per line.
-// It sorts the keys to ensure deterministic output.
-func saveState(path string, state map[string]struct{}) error {
-	// Open with O_RDWR and O_CREATE to ensure existence and writeability,
-	// but avoid O_TRUNC here to prevent data loss before locking.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	// Acquire an exclusive lock to prevent concurrent writes or reads
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-
-	// If running as root, attempt to match the file ownership to the parent directory.
-	// This ensures that if sudo is used to run the tool, the state file remains
-	// owned by the user who owns the source directory, keeping it readable/writable
-	// for them in the future.
-	if os.Getuid() == 0 {
-		dir := filepath.Dir(path)
-		if info, err := os.Stat(dir); err == nil {
-			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-				// Best-effort attempt to change ownership. We ignore errors
-				// (e.g. filesystem quirks) to avoid blocking the sync operation.
-				_ = f.Chown(int(stat.Uid), int(stat.Gid))
-			}
-		}
-	}
-
-	// Now that we have the lock, truncate the file to overwrite content
+// saveState writes the relative source paths to the locked state file.
+// It truncates the file before writing and ensures content is synced.
+func saveState(f *os.File, state map[string]struct{}) error {
+	// Truncate file to 0 size to overwrite content
 	if err := f.Truncate(0); err != nil {
 		return err
 	}
 
-	// Ensure we are at the beginning of the file
+	// Ensure we write from the beginning
 	if _, err := f.Seek(0, 0); err != nil {
 		return err
 	}
@@ -1032,4 +1030,19 @@ func saveState(path string, state map[string]struct{}) error {
 
 	// Flush writes to stable storage
 	return f.Sync()
+}
+
+// ensureStateOwnership attempts to set the ownership of the state file
+// to match the parent directory if the process is running as root.
+func ensureStateOwnership(f *os.File, path string) {
+	if os.Getuid() == 0 {
+		dir := filepath.Dir(path)
+		if info, err := os.Stat(dir); err == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+				// Best-effort attempt to change ownership. We ignore errors
+				// (e.g. filesystem quirks) to avoid blocking the sync operation.
+				_ = f.Chown(int(stat.Uid), int(stat.Gid))
+			}
+		}
+	}
 }
