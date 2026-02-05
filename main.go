@@ -80,7 +80,7 @@ func main() {
 	srcFlag := flag.String("src", "", "Source directory (default: current working directory)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
-	othersFlag := flag.Bool("others", false, "Set permissions to world-readable (readable by all local users, 0644), and world-executable (0755) if user-executable, disregarding the source file's group and other bits")
+	othersFlag := flag.Bool("others", false, "Set permissions to world-readable (0644), and to world-executable (0755) if the source file is user-executable, disregarding the source file's group and other bits")
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
 	flag.Parse()
