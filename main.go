@@ -138,6 +138,11 @@ func main() {
 		}
 	}
 
+	// Safety check: prevent operations where source and destination are the same
+	if absSrc == absDst {
+		logger.Fatalf("Error: source and destination directories are the same (%s). Operation canceled to prevent unintended modifications.", absSrc)
+	}
+
 	cfg := Config{
 		Watch:    *watchFlag,
 		BinDirs:  binDirs,
@@ -424,7 +429,7 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 					logger.Printf("Error removing destination symlink %s: %v", targetPath, err)
 					return nil
 				}
-				// We treated the symlink as "invalid" state and removed it.
+				// We treated the symlink as an invalid state and removed it.
 				// Now we proceed as if the file does not exist.
 				dstExists = false
 			} else if dstInfo.IsDir() {
