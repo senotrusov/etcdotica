@@ -58,9 +58,14 @@ type fileMeta struct {
 	Mode    os.FileMode
 }
 
-// Global logger setup
+// Global configuration and logger setup
 var (
 	logger = log.New(os.Stderr, "", 0) // No timestamp, plain output to stderr
+
+	// watchRetryInterval defines the duration the program waits between
+	// synchronization attempts when in watch mode or when recovering from
+	// transient filesystem errors.
+	watchRetryInterval = 3 * time.Second
 )
 
 // Regex for detecting section files: e.g. "etc/fstab.external-disks-section"
@@ -165,7 +170,7 @@ func main() {
 			if !cfg.Watch {
 				os.Exit(1)
 			}
-			time.Sleep(2 * time.Second)
+			time.Sleep(watchRetryInterval)
 			continue
 		}
 
@@ -176,7 +181,7 @@ func main() {
 			if !cfg.Watch {
 				os.Exit(1)
 			}
-			time.Sleep(2 * time.Second)
+			time.Sleep(watchRetryInterval)
 			continue
 		}
 
@@ -190,7 +195,7 @@ func main() {
 			if !cfg.Watch {
 				os.Exit(1)
 			}
-			time.Sleep(2 * time.Second)
+			time.Sleep(watchRetryInterval)
 			continue
 		}
 
@@ -225,7 +230,7 @@ func main() {
 			break
 		}
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(watchRetryInterval)
 	}
 }
 
