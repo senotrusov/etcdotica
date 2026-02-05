@@ -91,7 +91,7 @@ To use `etcdotica`, run the binary. By default, the program treats the current w
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
 | `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
 | `-umask` | `string` | Set process umask (octal, e.g. `022`). |
-| `-others` | `bool` | Set permissions to world-readable (`0644`), and to world-executable (`0755`) if the source file is user-executable, disregarding the source file's group and other bits. |
+| `-everyone` | `bool` | Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode. |
 
 #### Examples
 
@@ -130,7 +130,7 @@ etcdotica -src ./configs -dst /tmp/configs-backup
 Sync configurations to `/etc` ensuring they are readable by all users:
 
 ```bash
-sudo etcdotica -src ./etc-files -dst /etc -others
+sudo etcdotica -src ./etc-files -dst /etc -everyone
 ```
 
 ### 🔄 State & Pruning
