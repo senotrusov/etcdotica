@@ -7,7 +7,9 @@
 - **One-Way Synchronization:** Mirrors the source directory to the destination directory. Defaults to syncing the current working directory to the current user's home directory (or `/` if running as root).
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
 - **Managed Sections:** Merge content into existing files instead of overwriting them, using sections.
-- **Pruning:** Automatically removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
+- **Automatic Pruning:** Removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
+- **Section Rollback:** If a section file is deleted from the source, the corresponding section is automatically removed from the target file.
+- **Safe Concurrency:** Uses advisory file locking (`flock`) to ensure that multiple instances can run safely without corrupting files or the state.
 - **Permission Handling:** Applies the system (or provided) `umask` to ensure files are copied with correct and secure permissions. Can optionally enforce world-readability.
 - **Executable Enforcement:** Optionally scans specified directories (like `bin/`) and ensures all files within them have executable bits set before syncing, respecting system `umask`.
 - **Symlink Resolution:** Follows and resolves symlinks in the source directory before copying the actual content to the destination.
@@ -131,8 +133,12 @@ Sync configurations to `/etc` ensuring they are readable by all users:
 sudo etcdotica -src ./etc-files -dst /etc -others
 ```
 
-**6. State Tracking**
-`etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks which files have been installed, allowing the tool to clean up (delete) files from your destination directory if you remove them from your source.
+### 🔄 State & Pruning
+
+`etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully installed.
+
+1. **File Removal:** If you delete a file from your source directory, `etcdotica` detects its absence compared to the state file and removes the corresponding file from the destination.
+1. **Section Removal:** If you delete a section file (e.g., `etc/fstab.mounts-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
 
 ### 🧩 Managed Sections
 
@@ -175,6 +181,16 @@ To ensure safety and predictability, `etcdotica` follows specific rules when it 
 
 **Pruning Safety:** When the tool identifies an orphaned file at the destination that needs to be removed (because it no longer exists in the source), it uses a safe removal method. If that orphaned file is a symlink, only the symlink pointer itself is deleted; the file or directory it was pointing to remains untouched.
 
+### 🔒 Concurrency & Safety
+
+`etcdotica` is designed for robust operation in multi-tasking environments. It uses **advisory file locking** (`flock`) on the destination files, the section-managed files, and its own `.etcdotica` state file.
+
+This means:
+
+- **Watch Mode + Manual Sync:** You can leave one instance running in `-watch` mode and manually trigger another sync without risk of data corruption or race conditions.
+- **Multiple Instances:** Multiple users or scripts can safely run `etcdotica` against the same destination or source simultaneously.
+- **Atomic-like Writes:** While it writes directly to files (to preserve Inodes and hardlinks), the exclusive lock ensures that no other process using standard locking will read a partially written file.
+
 ### ⚠️ Direct Writes & Inode Stability
 
 `etcdotica` writes directly to destination files instead of using a "write-to-temp and rename" strategy. This design prioritizes three factors:
@@ -183,7 +199,7 @@ To ensure safety and predictability, `etcdotica` follows specific rules when it 
 - **Stable Inodes:** Writing in-place keeps the file's Inode constant. This preserves existing hardlinks and ensures active system watches (like `inotify`) remain attached to the file.
 - **Architectural Simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writeable location for these transients across varying mount points adds significant complexity that falls outside the scope of this tool.
 
-**The Trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a **partially written** file. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
+**The Trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a **partially written** file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
 
 ### License
 
