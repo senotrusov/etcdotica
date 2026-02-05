@@ -684,18 +684,7 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 	// os.OpenFile uses expectedPerms only if the file is created.
 	f, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE, expectedPerms)
 	if err != nil {
-		// If failure is due to missing dir, try creating dir first
-		if os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(dstPath), 0755 & ^umask); err != nil {
-				return false, err
-			}
-			f, err = os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE, expectedPerms)
-			if err != nil {
-				return false, err
-			}
-		} else {
-			return false, err
-		}
+		return false, err
 	}
 	defer f.Close()
 
