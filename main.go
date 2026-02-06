@@ -17,6 +17,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
@@ -613,6 +614,8 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 // installFile copies content and forces the specific calculated permissions.
 // It acquires an exclusive lock on the destination file during the write operation
 // to prevent concurrent modifications.
+// It also performs a post-write verification to mitigate TOCTOU race conditions
+// where the file might be modified between the close and the Chtimes call.
 func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	s, err := os.Open(src)
 	if err != nil {
@@ -643,8 +646,12 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 		return err
 	}
 
-	// 4. Copy Content
-	if _, err := io.Copy(d, s); err != nil {
+	// Prepare hashing to capture what we intend to write
+	srcHasher := sha256.New()
+	writer := io.MultiWriter(d, srcHasher)
+
+	// 4. Copy Content (Write to file + Hash)
+	if _, err := io.Copy(writer, s); err != nil {
 		d.Close()
 		return err
 	}
@@ -664,8 +671,43 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	}
 
 	// 7. Sync Mtime
+	// This is the critical moment where a race can happen.
+	// We set the time to match the source.
 	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
 		logger.Printf("Warning: failed to set mtime on %s: %v", dst, err)
+	}
+
+	// 8. Verification (Mitigate TOCTOU)
+	// We re-open the file with a shared lock to read back what is on disk.
+	// If it differs from what we just wrote (srcHasher), it means an external
+	// process modified it during the window between Close() and Chtimes() (or slightly after).
+	// If we detect this, we touch the file to current time. This ensures the
+	// ModTime differs from the Source ModTime, forcing a sync on the next run.
+
+	dVerify, err := os.Open(dst)
+	if err != nil {
+		// If we can't open for verification, we assume something is wrong.
+		return fmt.Errorf("verification failed: cannot open %s: %v", dst, err)
+	}
+	defer dVerify.Close()
+
+	if err := syscall.Flock(int(dVerify.Fd()), syscall.LOCK_SH); err != nil {
+		return fmt.Errorf("verification failed: cannot lock %s: %v", dst, err)
+	}
+
+	dstHasher := sha256.New()
+	if _, err := io.Copy(dstHasher, dVerify); err != nil {
+		return fmt.Errorf("verification failed: cannot read %s: %v", dst, err)
+	}
+
+	// We don't need to explicitly unlock; Close() releases the lock.
+
+	if !bytes.Equal(srcHasher.Sum(nil), dstHasher.Sum(nil)) {
+		logger.Printf("Warning: content mismatch detected for %s after sync. Possible concurrent modification. updating mtime to force future sync.", dst)
+		now := time.Now()
+		if err := os.Chtimes(dst, now, now); err != nil {
+			logger.Printf("Error: failed to touch %s after mismatch: %v", dst, err)
+		}
 	}
 
 	return nil
