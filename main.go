@@ -218,6 +218,7 @@ func main() {
 		var currentState map[string]struct{}
 
 		// We check `cachedState != nil` to ensure we don't use an empty cache on the very first run.
+		// Skip re-parsing if the file metadata (mtime/size) remains identical.
 		if statErr == nil && cachedState != nil &&
 			stateFileInfo.ModTime().Equal(cachedStateMeta.ModTime) &&
 			stateFileInfo.Size() == cachedStateMeta.Size {
@@ -343,6 +344,7 @@ func ensureExecBits(srcRoot string, binDirs []string, umask os.FileMode) {
 
 			// Check if the required executable bits are present.
 			// (currentMode & targetModeBits) == targetModeBits implies all bits in targetModeBits are set.
+			// If they are already set, we skip the Chmod operation.
 			if currentMode&targetModeBits != targetModeBits {
 				// We don't unset any bits; we only add the required ones.
 				newMode := currentMode | targetModeBits
@@ -431,7 +433,8 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 				newState[relPath] = struct{}{}
 				processedFiles[relPath] = true
 
-				// Watch optimization for section files
+				// Watch optimization for section files: skip processing if the source file
+				// has not changed since the last loop iteration.
 				if cfg.Watch {
 					lastMeta, known := metaCache[path]
 					if known &&
@@ -454,7 +457,8 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 			}
 		}
 
-		// Watch optimization for standard files: skip if metadata hasn't changed
+		// Watch optimization for standard files: skip processing if the source metadata
+		// matches our cache and the file was already successfully recorded in the state.
 		if cfg.Watch {
 			lastMeta, known := metaCache[path]
 			if known &&
@@ -836,11 +840,11 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 		_ = i
 	}
 
-	// Check if content actually changed
+	// 9. Comparison and Write Back
+	// Skip the write if the merged content is identical to existing content.
 	newBytes := buf.Bytes()
 	contentChanged := !bytes.Equal(content, newBytes)
 
-	// 9. Write Back
 	if contentChanged {
 		if err := f.Truncate(0); err != nil {
 			return false, err
