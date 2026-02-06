@@ -500,21 +500,15 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 
 		// Handle Directory
 		if realInfo.IsDir() {
-			// Check for conflict: Dest exists and is a file.
-			// We use Stat to follow symlinks. If dst is a symlink to a directory,
-			// Stat returns IsDir() == true, and we allow it.
-			dstInfo, err := os.Stat(targetPath)
-			if err == nil && !dstInfo.IsDir() {
-				logger.Printf("Conflict: src is dir, dst is file. Skipping %s", targetPath)
-				return nil
-			}
-
-			// Create the directory if it doesn't exist.
+			// MkdirAll will create the directory and any necessary parents.
+			// If the path already exists and is a directory, it does nothing.
+			// If the path exists and is a file, it will return an error.
 			// If it exists (even as a symlink to a dir), MkdirAll returns nil (success).
 			if err := os.MkdirAll(targetPath, expectedPerms); err != nil {
-				logger.Printf("Failed to create dir %s: %v", targetPath, err)
-				return nil
+				logger.Printf("Skipping source directory: failed to create %s: %v", targetPath, err)
+				return filepath.SkipDir
 			}
+			// Note that we do not prune directories or modify permissions on existing ones.
 			return nil
 		}
 
