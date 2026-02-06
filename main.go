@@ -532,7 +532,7 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 			}
 			// Chmod might not affect mtime, but we ensure consistency
 			if err := os.Chtimes(targetPath, currentMeta.ModTime, currentMeta.ModTime); err != nil {
-				logger.Printf("Warning: failed to chtimes %s: %v", targetPath, err)
+				logger.Printf("Warning: failed to set mtime on %s: %v", targetPath, err)
 			}
 			changed = true
 		}
