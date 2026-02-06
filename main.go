@@ -175,6 +175,13 @@ func main() {
 	// Cache stores metadata to detect changes in watch mode
 	metaCache := make(map[string]fileMeta)
 
+	// State cache variables to avoid re-parsing the state file if it hasn't changed.
+	// These persist across loop iterations.
+	var (
+		cachedState     map[string]struct{}
+		cachedStateMeta fileMeta
+	)
+
 	for {
 		// Open the state file with read/write permissions. Create if it doesn't exist.
 		// We hold the file handle and lock throughout the entire sync process to prevent race conditions.
@@ -204,21 +211,53 @@ func main() {
 		// Ensure correct ownership if running as root
 		ensureStateOwnership(stateFile, stateFilePath)
 
-		// Ensure we read from the beginning
-		if _, err := stateFile.Seek(0, 0); err != nil {
-			logger.Printf("Error seeking state file: %v", err)
-			stateFile.Close()
-			if !cfg.Watch {
-				os.Exit(1)
-			}
-			time.Sleep(watchRetryInterval)
-			continue
-		}
+		// 6. Load or reuse State
+		// We perform this check strictly after acquiring the lock to ensure atomicity.
+		// We use statErr to distinctly track the success of this specific operation.
+		stateFileInfo, statErr := stateFile.Stat()
+		var currentState map[string]struct{}
 
-		// Load Current State
-		currentState, err := loadState(stateFile)
-		if err != nil {
-			currentState = make(map[string]struct{})
+		// We check `cachedState != nil` to ensure we don't use an empty cache on the very first run.
+		if statErr == nil && cachedState != nil &&
+			stateFileInfo.ModTime().Equal(cachedStateMeta.ModTime) &&
+			stateFileInfo.Size() == cachedStateMeta.Size {
+			currentState = cachedState
+		} else {
+			// Cache miss, first run, or file changed: Read from the beginning
+			if _, err := stateFile.Seek(0, 0); err != nil {
+				logger.Printf("Error seeking state file: %v", err)
+				stateFile.Close()
+				if !cfg.Watch {
+					os.Exit(1)
+				}
+				time.Sleep(watchRetryInterval)
+				continue
+			}
+
+			currentState, err = loadState(stateFile)
+			if err != nil {
+				// If load fails (e.g. corruption), we assume empty state for THIS run.
+				// We log a warning so the user knows why pruning might be behaving as if the state is empty.
+				logger.Printf("Warning: failed to parse state file, assuming empty state: %v", err)
+				currentState = make(map[string]struct{})
+			}
+
+			// Update cache unconditionally if Stat succeeded.
+			// Even if loadState returned an error (and we are using an empty map),
+			// this result is authoritative for this specific file version (Mtime/Size).
+			// If the file is broken, we cache the "broken" (empty) state.
+			// Next iteration, if Mtime/Size is the same, we skip parsing and reuse the empty state.
+			if statErr == nil {
+				cachedState = currentState
+				cachedStateMeta = fileMeta{
+					ModTime: stateFileInfo.ModTime(),
+					Size:    stateFileInfo.Size(),
+				}
+			} else {
+				// If Stat failed, we can't reliably cache this result for the future
+				// because we don't know the keys (time/size) to check against.
+				cachedState = nil
+			}
 		}
 
 		// Ensure executable bits are set in specified bin directories before syncing
@@ -238,6 +277,11 @@ func main() {
 				if err := saveState(stateFile, newState); err != nil {
 					logger.Printf("Error saving state: %v", err)
 				}
+				// We do NOT update the cache here.
+				// If we wrote to the file, its mtime/size on disk has changed.
+				// On the next iteration, the check at the top of the loop will fail (mismatch),
+				// causing a fresh read. This ensures strict consistency without complex cache
+				// invalidation logic here.
 			}
 			stateFile.Close() // Release lock
 		}
