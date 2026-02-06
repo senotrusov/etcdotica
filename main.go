@@ -509,30 +509,18 @@ func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCach
 			return nil
 		}
 
-		// 2. File exists: Check Content (Size & Mtime)
-		contentMismatch := false
-		if currentMeta.Size != dstInfo.Size() || !currentMeta.ModTime.Equal(dstInfo.ModTime()) {
-			contentMismatch = true
-		}
+		// 2. File exists: Check for any mismatch (Size, Mtime, or Permissions).
+		// If anything is out of sync, we perform a full reinstall of the file.
+		// This is safer than separate checks (like a standalone chmod) as it mitigates
+		// potential TOCTOU vulnerabilities where the file could be replaced with a
+		// symlink between the check and the operation.
+		if currentMeta.Size != dstInfo.Size() ||
+			!currentMeta.ModTime.Equal(dstInfo.ModTime()) ||
+			dstInfo.Mode().Perm() != expectedPerms {
 
-		if contentMismatch {
 			if err := installFile(path, targetPath, realInfo, expectedPerms); err != nil {
 				logger.Printf("Failed to update %s: %v", targetPath, err)
 				return nil
-			}
-			changed = true
-			return nil
-		}
-
-		// 3. Content matches: Check Permissions
-		// If the destination permissions differ from expected, sync them.
-		if dstInfo.Mode().Perm() != expectedPerms {
-			if err := os.Chmod(targetPath, expectedPerms); err != nil {
-				logger.Printf("Warning: failed to chmod %s: %v", targetPath, err)
-			}
-			// Chmod might not affect mtime, but we ensure consistency
-			if err := os.Chtimes(targetPath, currentMeta.ModTime, currentMeta.ModTime); err != nil {
-				logger.Printf("Warning: failed to set mtime on %s: %v", targetPath, err)
 			}
 			changed = true
 		}
@@ -619,17 +607,18 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 		return err
 	}
 
-	// 5. Close (Releases Lock)
+	// 5. Sync Permissions
+	// OpenFile only applies mode on creation. If the file existed, mode is ignored.
+	// We use the file descriptor to apply permissions to ensure we are modifying
+	// the exact file we wrote to, avoiding potential symlink-swapping races.
+	if err := d.Chmod(perm); err != nil {
+		logger.Printf("Warning: failed to chmod %s: %v", dst, err)
+	}
+
+	// 6. Close (Releases Lock)
 	// Explicitly closing allows us to check for write errors, and implicitly releases the flock.
 	if err := d.Close(); err != nil {
 		return err
-	}
-
-	// 6. Sync Permissions
-	// OpenFile only applies mode on creation. If the file existed, mode is ignored.
-	// We explicit chmod to the calculated permission to handle updates and ensure correctness.
-	if err := os.Chmod(dst, perm); err != nil {
-		logger.Printf("Warning: failed to chmod %s: %v", dst, err)
 	}
 
 	// 7. Sync Mtime
