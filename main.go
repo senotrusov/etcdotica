@@ -66,7 +66,7 @@ var (
 	// watchRetryInterval defines the duration the program waits between
 	// synchronization attempts when in watch mode or when recovering from
 	// transient filesystem errors.
-	watchRetryInterval = 3 * time.Second
+	watchRetryInterval = 5 * time.Second
 )
 
 // Regex for detecting section files: e.g. "etc/fstab.external-disks-section"
