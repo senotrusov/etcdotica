@@ -88,7 +88,7 @@ func main() {
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
 	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode.")
 	var binDirs stringArray
-	flag.Var(&binDirs, "bindir", "Directory relative to source directory where files must be executable (can be repeated)")
+	flag.Var(&binDirs, "bindir", "Directory relative to the source directory in which all files will be ensured to have the executable bit set (can be repeated)")
 	flag.Parse()
 
 	// Validation: src is required
