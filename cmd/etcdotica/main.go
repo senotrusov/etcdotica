@@ -17,6 +17,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -564,24 +565,44 @@ func (s *syncer) prune() {
 		// Check if it's a section file
 		if match := sectionFileRx.FindStringSubmatch(oldRelPath); match != nil {
 			targetPath := filepath.Join(s.cfg.Dst, match[1])
-			logger.Debug("Removing orphaned section", "section", match[2], "target", targetPath)
-			if chg, err := removeSection(targetPath, match[2]); err != nil {
-				logger.Error("Failed to remove section", "section", match[2], "target", targetPath, "err", err)
-			} else if chg {
+
+			section := match[2]
+			chg, err := removeSection(targetPath, section)
+
+			switch {
+			case err != nil:
+				logger.Error("Failed to remove section", "section", section, "target", targetPath, "err", err)
+
+			case chg:
+				logger.Debug("Removed orphaned section", "section", section, "target", targetPath)
 				s.changed = true
+
+			default:
+				// This handles the case where err is nil but chg is false
+				logger.Debug("Orphaned section already gone; state matches desired", "section", section, "target", targetPath)
 			}
+
 			continue
 		}
 
 		// Regular file
 		targetPath := filepath.Join(s.cfg.Dst, oldRelPath)
-		// Remove orphaned file. Do not remove directories.
-		logger.Debug("Removing orphaned file", "file", targetPath)
-		if err := os.Remove(targetPath); err == nil {
+
+		err := os.Remove(targetPath)
+
+		switch {
+		case err == nil:
+			logger.Debug("Removed orphaned file", "file", targetPath)
 			s.changed = true
-		} else if !os.IsNotExist(err) {
+
+		case errors.Is(err, os.ErrNotExist):
+			logger.Debug("Orphaned file already gone; state matches desired", "file", targetPath)
+			s.changed = true
+
+		default:
 			logger.Error("Failed to remove orphaned file", "file", targetPath, "err", err)
 		}
+
 	}
 }
 
