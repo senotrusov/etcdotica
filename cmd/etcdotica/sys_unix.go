@@ -1,3 +1,17 @@
+//  Copyright 2025-2026 Stanislav Senotrusov
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+
 //go:build !windows
 
 package main
@@ -15,7 +29,8 @@ func setupUmask(umaskStr string) os.FileMode {
 	if umaskStr != "" {
 		val, err := strconv.ParseUint(umaskStr, 8, 32)
 		if err != nil {
-			logger.Fatalf("Error parsing umask flag: %v", err)
+			logger.Error("Error parsing umask flag", "err", err)
+			os.Exit(1)
 		}
 		unix.Umask(int(val))
 		return os.FileMode(val)
@@ -113,12 +128,14 @@ func processExecDir(dir string, targetBits os.FileMode) {
 		if realInfo.Mode()&targetBits != targetBits {
 			// We don't unset any bits; we only add the required ones.
 			if err := os.Chmod(path, realInfo.Mode()|targetBits); err != nil {
-				logger.Printf("Warning: failed to set exec bit on %s: %v", path, err)
+				logger.Warn("Failed to set exec bit", "path", path, "err", err)
+			} else {
+				logger.Debug("Set executable bit", "path", path)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		logger.Printf("Warning: error scanning bindir %s: %v", dir, err)
+		logger.Warn("Error scanning bindir", "dir", dir, "err", err)
 	}
 }

@@ -1,4 +1,4 @@
-//  Copyright 2025 Stanislav Senotrusov
+//  Copyright 2025-2026 Stanislav Senotrusov
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -61,7 +61,7 @@ type fileMeta struct {
 
 // Global configuration and logger setup
 var (
-	logger = log.New(os.Stderr, "", 0) // No timestamp, plain output to stderr
+	logger *slog.Logger
 
 	// watchRetryInterval defines the duration the program waits between
 	// synchronization attempts when in watch mode or when recovering from
@@ -93,7 +93,8 @@ func main() {
 	// We only strictly require existence at start. Transient failures later
 	// (in watch mode) are handled in the loop.
 	if err := validateSource(cfg.Src); err != nil {
-		logger.Fatalf("Error: %v", err)
+		logger.Error("Error validating source", "err", err)
+		os.Exit(1)
 	}
 
 	stateFilePath := filepath.Join(cfg.Src, ".etcdotica")
@@ -108,14 +109,20 @@ func parseFlags() Config {
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
 	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode.")
+	logFormat := flag.String("log-format", "human", "Log format: human, text or json")
+	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to the source directory in which all files will be ensured to have the executable bit set (can be repeated)")
 	flag.Parse()
 
+	setupLogger(*logFormat, *logLevel)
+
 	// Validation: src is required
 	if *srcFlag == "" {
 		flag.Usage()
-		logger.Fatalf("Error: -src argument is required")
+		logger.Error("Error: -src argument is required")
+		os.Exit(1)
 	}
 
 	umask := setupUmask(*umaskFlag)
@@ -135,14 +142,16 @@ func parseFlags() Config {
 func resolvePaths(src, dst string) (string, string) {
 	absSrc, err := filepath.Abs(src)
 	if err != nil {
-		logger.Fatalf("Error resolving source path: %v", err)
+		logger.Error("Error resolving source path", "err", err)
+		os.Exit(1)
 	}
 
 	var absDst string
 	if dst != "" {
 		absDst, err = filepath.Abs(dst)
 		if err != nil {
-			logger.Fatalf("Error resolving destination path: %v", err)
+			logger.Error("Error resolving destination path", "err", err)
+			os.Exit(1)
 		}
 	} else {
 		absDst = getDefaultDest()
@@ -150,13 +159,15 @@ func resolvePaths(src, dst string) (string, string) {
 
 	// Safety check: prevent operations where source and destination are the same
 	if absSrc == absDst {
-		logger.Fatalf("Error: source and destination directories are the same (%s). Operation canceled to prevent unintended modifications.", absSrc)
+		logger.Error("Error: source and destination directories are the same. Operation canceled.", "path", absSrc)
+		os.Exit(1)
 	}
 	return absSrc, absDst
 }
 
 // validateSource checks if the source directory exists and is valid.
 func validateSource(src string) error {
+	logger.Debug("Validating source directory", "path", src)
 	info, err := os.Stat(src)
 	if err != nil {
 		return fmt.Errorf("accessing source directory %s: %v", src, err)
@@ -171,7 +182,8 @@ func validateSource(src string) error {
 func getDefaultDest() string {
 	currentUser, err := user.Current()
 	if err != nil {
-		logger.Fatalf("Error getting current user info: %v", err)
+		logger.Error("Error getting current user info", "err", err)
+		os.Exit(1)
 	}
 	path := currentUser.HomeDir
 	if currentUser.Uid == "0" {
@@ -180,7 +192,8 @@ func getDefaultDest() string {
 	// Ensure absolute path even for defaults
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		logger.Fatalf("Error resolving default destination: %v", err)
+		logger.Error("Error resolving default destination", "err", err)
+		os.Exit(1)
 	}
 	return abs
 }
@@ -218,6 +231,7 @@ func runLoop(cfg Config, stateFilePath string) {
 			// Dropping the cache forces the syncer to bypass the "source unchanged" optimization
 			// and strictly compare source vs destination metadata (mtime, size, perms).
 			// This detects and reverts external modifications to destination files.
+			logger.Debug("Clearing metadata cache for periodic full scan")
 			metaCache = make(map[string]fileMeta)
 			iterationCount = 0
 		}
@@ -227,12 +241,14 @@ func runLoop(cfg Config, stateFilePath string) {
 // syncIteration performs a single pass of synchronization.
 // Returns true if successful (or recoverable), false if a fatal error occurred.
 func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]struct{}, cachedStateMeta *fileMeta, metaCache map[string]fileMeta) bool {
+	logger.Debug("Starting sync iteration")
+
 	// Open the state file with read/write permissions.
 	// We hold the file handle and lock throughout the entire sync process to prevent race conditions.
 	// If the source directory is transiently unavailable (e.g. network mount), this will fail.
 	stateFile, err := openAndLockState(stateFilePath)
 	if err != nil {
-		logger.Printf("Error accessing state file: %v", err)
+		logger.Error("Error accessing state file", "err", err)
 		return false
 	}
 	defer stateFile.Close() // Releases lock
@@ -245,7 +261,7 @@ func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]str
 	if err != nil {
 		// If load fails (e.g. corruption), we assume empty state for THIS run.
 		// We log a warning so the user knows why pruning might be behaving as if the state is empty.
-		logger.Printf("Warning: failed to parse state file, assuming empty state: %v", err)
+		logger.Warn("Failed to parse state file, assuming empty state", "err", err)
 	}
 
 	// Ensure executable bits are set in specified bin directories before syncing
@@ -254,7 +270,7 @@ func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]str
 	// Perform Sync
 	s := newSyncer(cfg, currentState, metaCache)
 	if err := s.run(); err != nil {
-		logger.Printf("Sync error: %v", err)
+		logger.Error("Sync error", "err", err)
 		return false
 	}
 
@@ -263,7 +279,7 @@ func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]str
 	// On the next iteration, the check at the top of the loop will fail (mismatch), causing a fresh read.
 	if s.changed {
 		if err := saveState(stateFile, s.newState); err != nil {
-			logger.Printf("Error saving state: %v", err)
+			logger.Error("Error saving state", "err", err)
 		}
 	}
 	return true
@@ -369,7 +385,7 @@ func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 	// to get the actual file info for correct mtime comparison and permission copying.
 	realInfo, err := os.Stat(path)
 	if err != nil {
-		logger.Printf("Warning: skipping unreadable file or broken link %s: %v", relPath, err)
+		logger.Warn("Skipping unreadable file or broken link", "path", relPath, "err", err)
 		// Mark processed to prevent pruning on read error
 		s.processedFiles[relPath] = true
 		return nil
@@ -404,7 +420,7 @@ func (s *syncer) handleDirectory(relPath string, info os.FileInfo) error {
 	// MkdirAll will create the directory and any necessary parents.
 	// Note that we do not prune directories or modify permissions on existing ones.
 	if err := os.MkdirAll(targetPath, expectedPerms); err != nil {
-		logger.Printf("Skipping source directory: failed to create %s: %v", targetPath, err)
+		logger.Warn("Skipping source directory: failed to create", "path", targetPath, "err", err)
 		return filepath.SkipDir
 	}
 	return nil
@@ -433,12 +449,14 @@ func (s *syncer) processSection(srcPath, relPath, targetRel, sectionName string,
 		return nil
 	}
 
+	logger.Debug("Processing section", "name", sectionName, "target", targetAbsPath)
 	didChange, err := mergeSection(srcPath, targetAbsPath, sectionName, info, s.cfg.ProcessUmask, s.cfg.Everyone)
 	if err != nil {
-		logger.Printf("Failed to merge section %s into %s: %v", sectionName, targetAbsPath, err)
+		logger.Error("Failed to merge section", "section", sectionName, "target", targetAbsPath, "err", err)
 		// On error, invalidate cache so we retry this file on the next watch cycle
 		delete(s.metaCache, srcPath)
 	} else if didChange {
+		logger.Debug("Section merged and content changed", "target", targetAbsPath)
 		s.changed = true
 	}
 	return nil
@@ -467,7 +485,7 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 	// This is safer than separate checks (like a standalone chmod) as it mitigates TOCTOU.
 	shouldUpdate, err := s.needsUpdate(targetPath, info, expectedPerms)
 	if err != nil {
-		logger.Printf("Error checking destination state for %s: %v", targetPath, err)
+		logger.Error("Error checking destination state", "path", targetPath, "err", err)
 		// On error, invalidate cache so we retry this file on the next watch cycle
 		delete(s.metaCache, srcPath)
 		return nil
@@ -475,7 +493,7 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 
 	if shouldUpdate {
 		if err := installFile(srcPath, targetPath, info, expectedPerms); err != nil {
-			logger.Printf("Failed to update/install %s: %v", targetPath, err)
+			logger.Error("Failed to update/install", "path", targetPath, "err", err)
 			// On error, invalidate cache so we retry this file on the next watch cycle
 			delete(s.metaCache, srcPath)
 		} else {
@@ -546,8 +564,9 @@ func (s *syncer) prune() {
 		// Check if it's a section file
 		if match := sectionFileRx.FindStringSubmatch(oldRelPath); match != nil {
 			targetPath := filepath.Join(s.cfg.Dst, match[1])
+			logger.Debug("Removing orphaned section", "section", match[2], "target", targetPath)
 			if chg, err := removeSection(targetPath, match[2]); err != nil {
-				logger.Printf("Failed to remove section %s from %s: %v", match[2], targetPath, err)
+				logger.Error("Failed to remove section", "section", match[2], "target", targetPath, "err", err)
 			} else if chg {
 				s.changed = true
 			}
@@ -557,10 +576,11 @@ func (s *syncer) prune() {
 		// Regular file
 		targetPath := filepath.Join(s.cfg.Dst, oldRelPath)
 		// Remove orphaned file. Do not remove directories.
+		logger.Debug("Removing orphaned file", "file", targetPath)
 		if err := os.Remove(targetPath); err == nil {
 			s.changed = true
 		} else if !os.IsNotExist(err) {
-			logger.Printf("Failed to remove orphaned file %s: %v", targetPath, err)
+			logger.Error("Failed to remove orphaned file", "file", targetPath, "err", err)
 		}
 	}
 }
@@ -569,6 +589,7 @@ func (s *syncer) prune() {
 // It acquires an exclusive lock on the destination file during the write operation
 // to prevent concurrent modifications.
 func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
+	logger.Debug("Installing file", "src", src, "dst", dst)
 	s, err := os.Open(src)
 	if err != nil {
 		return err
@@ -622,7 +643,7 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	// 7. Sync Mtime
 	// This is the critical moment where a race can happen.
 	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
-		logger.Printf("Warning: failed to set mtime on %s: %v", dst, err)
+		logger.Warn("Failed to set mtime", "path", dst, "err", err)
 	}
 
 	// 8. Verification (Mitigate TOCTOU)
@@ -673,7 +694,7 @@ func verifyContent(src *os.File, dstPath string) error {
 	}
 
 	// Mismatch detected
-	logger.Printf("Warning: content mismatch for %s. Updating mtime to force sync.", dstPath)
+	logger.Warn("Content mismatch detected. Updating mtime to force sync.", "path", dstPath)
 	now := time.Now()
 	if err := os.Chtimes(dstPath, now, now); err != nil {
 		return fmt.Errorf("failed to update mtime after content mismatch: %v", err)
@@ -736,7 +757,7 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 	// We do this regardless of content change to ensure the file complies with the desired mode.
 	// Changing permissions does not trigger the changed indicator.
 	if err := f.Chmod(expectedPerms); err != nil {
-		logger.Printf("Warning: failed to chmod %s: %v", dstPath, err)
+		logger.Warn("Failed to chmod", "path", dstPath, "err", err)
 	}
 
 	return changed, nil
