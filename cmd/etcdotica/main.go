@@ -26,9 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -131,23 +129,6 @@ func parseFlags() Config {
 		Everyone:     *everyoneFlag,
 		ProcessUmask: umask,
 	}
-}
-
-// setupUmask configures the process umask.
-func setupUmask(umaskStr string) os.FileMode {
-	if umaskStr != "" {
-		val, err := strconv.ParseUint(umaskStr, 8, 32)
-		if err != nil {
-			logger.Fatalf("Error parsing umask flag: %v", err)
-		}
-		syscall.Umask(int(val))
-		return os.FileMode(val)
-	}
-	// syscall.Umask returns the old mask and sets the new one.
-	// We read it and immediately restore it.
-	sysMask := syscall.Umask(0)
-	syscall.Umask(sysMask)
-	return os.FileMode(sysMask)
 }
 
 // resolvePaths determines absolute paths for source and destination.
@@ -295,7 +276,7 @@ func openAndLockState(path string) (*os.File, error) {
 		return nil, err
 	}
 	// Acquire an exclusive lock immediately. This blocks until the lock is obtained.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(f.Fd(), true); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("locking state file: %v", err)
 	}
@@ -334,55 +315,6 @@ func loadStateWithCache(f *os.File, cachedState *map[string]struct{}, cachedMeta
 	}
 
 	return state, err
-}
-
-// ensureExecBits iterates over provided directories and ensures files have
-// the correct executable bits set, respecting the process umask.
-func ensureExecBits(srcRoot string, binDirs []string, umask os.FileMode) {
-	if len(binDirs) == 0 {
-		return
-	}
-	// Calculate the executable bits we want to enforce.
-	// 0111 are the standard executable bits for User, Group, Other.
-	// We mask them with the inverse of the umask.
-	targetModeBits := os.FileMode(0111) & ^umask
-
-	for _, relDir := range binDirs {
-		absDir := filepath.Join(srcRoot, relDir)
-		if info, err := os.Stat(absDir); err != nil || !info.IsDir() {
-			continue
-		}
-		processExecDir(absDir, targetModeBits)
-	}
-}
-
-// processExecDir walks a single bin directory.
-func processExecDir(dir string, targetBits os.FileMode) {
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip unreadable
-		}
-		if info.IsDir() {
-			return nil
-		}
-		// filepath.Walk uses Lstat. We use Stat here to follow symlinks.
-		realInfo, err := os.Stat(path)
-		if err != nil || realInfo.IsDir() {
-			return nil
-		}
-
-		// Check if the required executable bits are present.
-		if realInfo.Mode()&targetBits != targetBits {
-			// We don't unset any bits; we only add the required ones.
-			if err := os.Chmod(path, realInfo.Mode()|targetBits); err != nil {
-				logger.Printf("Warning: failed to set exec bit on %s: %v", path, err)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		logger.Printf("Warning: error scanning bindir %s: %v", dir, err)
-	}
 }
 
 // syncer holds the context for a synchronization operation.
@@ -569,26 +501,6 @@ func (s *syncer) checkCache(path string, info os.FileInfo) bool {
 		lastMeta.Mode == currentMeta.Mode
 }
 
-// calculatePerms determines the target file permissions.
-func calculatePerms(srcMode os.FileMode, umask os.FileMode, everyone bool) os.FileMode {
-	if !everyone {
-		// Standard behavior: mask source perms with umask
-		return srcMode.Perm() & ^umask
-	}
-	// Base read for everyone (0444)
-	permBits := os.FileMode(0444)
-
-	// Propagate write bit: if User Write (0200) -> add Write for all (0222)
-	if srcMode&0200 != 0 {
-		permBits |= 0222
-	}
-	// Propagate exec bit: if User Exec (0100) -> add Exec for all (0111)
-	if srcMode&0100 != 0 {
-		permBits |= 0111
-	}
-	return permBits & ^umask
-}
-
 // needsUpdate checks if the destination file needs to be replaced.
 // It returns true if an update is required, or false if the destination is up to date.
 // It returns an error if the destination state cannot be determined or resolved (e.g. symlink removal failure).
@@ -664,7 +576,7 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	defer s.Close()
 
 	// Acquire Shared Lock on Source
-	if err := syscall.Flock(int(s.Fd()), syscall.LOCK_SH); err != nil {
+	if err := lockFile(s.Fd(), false); err != nil {
 		return fmt.Errorf("locking source file: %v", err)
 	}
 
@@ -678,7 +590,7 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	}
 
 	// 2. Acquire Exclusive Lock. Must lock before modifying content.
-	if err := syscall.Flock(int(d.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(d.Fd(), true); err != nil {
 		d.Close()
 		return err
 	}
@@ -732,7 +644,7 @@ func verifyContent(src *os.File, dstPath string) error {
 	}
 	defer d.Close()
 
-	if err := syscall.Flock(int(d.Fd()), syscall.LOCK_SH); err != nil {
+	if err := lockFile(d.Fd(), false); err != nil {
 		return fmt.Errorf("verify lock failed: %v", err)
 	}
 
@@ -800,7 +712,7 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 	}
 	defer f.Close()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(f.Fd(), true); err != nil {
 		return false, err
 	}
 
@@ -950,7 +862,7 @@ func removeSection(dstPath, sectionName string) (bool, error) {
 	}
 	defer f.Close()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(f.Fd(), true); err != nil {
 		return false, err
 	}
 
@@ -1115,21 +1027,4 @@ func saveState(f *os.File, state map[string]struct{}) error {
 	}
 	// Flush writes to stable storage
 	return f.Sync()
-}
-
-// ensureStateOwnership attempts to set the ownership of the state file
-// to match the parent directory if the process is running as root.
-func ensureStateOwnership(f *os.File, path string) {
-	if os.Getuid() != 0 {
-		return
-	}
-	dir := filepath.Dir(path)
-	info, err := os.Stat(dir)
-	if err != nil {
-		return
-	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		// Best-effort attempt to change ownership.
-		_ = f.Chown(int(stat.Uid), int(stat.Gid))
-	}
 }
