@@ -17,7 +17,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
@@ -47,9 +46,12 @@ func (s *stringArray) Set(value string) error {
 
 // Config holds command line configuration
 type Config struct {
-	Watch    bool
-	BinDirs  []string
-	Everyone bool
+	Watch        bool
+	BinDirs      []string
+	Everyone     bool
+	Src          string
+	Dst          string
+	ProcessUmask os.FileMode
 }
 
 // fileMeta stores metadata for change detection
@@ -66,7 +68,13 @@ var (
 	// watchRetryInterval defines the duration the program waits between
 	// synchronization attempts when in watch mode or when recovering from
 	// transient filesystem errors.
-	watchRetryInterval = 5 * time.Second
+	watchRetryInterval = 4 * time.Second
+
+	// Number of iterations between full scans.
+	// This forces a re-validation of all destination files against the source,
+	// correcting any configuration drift caused by external processes.
+	// With a 4-second interval, this triggers a full scan roughly every 4 minutes.
+	fullScanIterations = 60
 )
 
 // Regex for detecting section files: e.g. "etc/fstab.external-disks-section"
@@ -81,7 +89,22 @@ var (
 )
 
 func main() {
-	// 1. Setup Flags
+	cfg := parseFlags()
+
+	// Initial validation: Source must exist and be a directory on startup.
+	// We only strictly require existence at start. Transient failures later
+	// (in watch mode) are handled in the loop.
+	if err := validateSource(cfg.Src); err != nil {
+		logger.Fatalf("Error: %v", err)
+	}
+
+	stateFilePath := filepath.Join(cfg.Src, ".etcdotica")
+
+	runLoop(cfg, stateFilePath)
+}
+
+// parseFlags handles command line argument parsing and configuration setup.
+func parseFlags() Config {
 	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
 	srcFlag := flag.String("src", "", "Source directory (required)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
@@ -97,83 +120,93 @@ func main() {
 		logger.Fatalf("Error: -src argument is required")
 	}
 
-	// 2. Configure Umask
-	var processUmask os.FileMode
-	if *umaskFlag != "" {
-		val, err := strconv.ParseUint(*umaskFlag, 8, 32)
+	umask := setupUmask(*umaskFlag)
+	absSrc, absDst := resolvePaths(*srcFlag, *dstFlag)
+
+	return Config{
+		Watch:        *watchFlag,
+		Src:          absSrc,
+		Dst:          absDst,
+		BinDirs:      binDirs,
+		Everyone:     *everyoneFlag,
+		ProcessUmask: umask,
+	}
+}
+
+// setupUmask configures the process umask.
+func setupUmask(umaskStr string) os.FileMode {
+	if umaskStr != "" {
+		val, err := strconv.ParseUint(umaskStr, 8, 32)
 		if err != nil {
 			logger.Fatalf("Error parsing umask flag: %v", err)
 		}
-		sysMask := int(val)
-		syscall.Umask(sysMask)
-		processUmask = os.FileMode(sysMask)
-	} else {
-		// syscall.Umask returns the old mask and sets the new one.
-		// We read it and immediately restore it.
-		sysMask := syscall.Umask(0)
-		syscall.Umask(sysMask)
-		processUmask = os.FileMode(sysMask)
+		syscall.Umask(int(val))
+		return os.FileMode(val)
 	}
+	// syscall.Umask returns the old mask and sets the new one.
+	// We read it and immediately restore it.
+	sysMask := syscall.Umask(0)
+	syscall.Umask(sysMask)
+	return os.FileMode(sysMask)
+}
 
-	// 3. Determine Source and Destination Paths
-	// Resolve Source Absolute Path
-	absSrc, err := filepath.Abs(*srcFlag)
+// resolvePaths determines absolute paths for source and destination.
+func resolvePaths(src, dst string) (string, string) {
+	absSrc, err := filepath.Abs(src)
 	if err != nil {
 		logger.Fatalf("Error resolving source path: %v", err)
 	}
 
-	// Initial validation: Source must exist and be a directory on startup.
-	// We only strictly require existence at start. Transient failures later (in watch mode) are handled in the loop.
-	srcInfo, err := os.Stat(absSrc)
-	if err != nil {
-		logger.Fatalf("Error accessing source directory %s: %v", absSrc, err)
-	}
-	if !srcInfo.IsDir() {
-		logger.Fatalf("Error: source path %s is not a directory", absSrc)
-	}
-
-	// Resolve Destination Absolute Path
 	var absDst string
-	if *dstFlag != "" {
-		absDst, err = filepath.Abs(*dstFlag)
+	if dst != "" {
+		absDst, err = filepath.Abs(dst)
 		if err != nil {
 			logger.Fatalf("Error resolving destination path: %v", err)
 		}
 	} else {
-		currentUser, err := user.Current()
-		if err != nil {
-			logger.Fatalf("Error getting current user info: %v", err)
-		}
-		isRoot := currentUser.Uid == "0"
-
-		absDst = currentUser.HomeDir
-		if isRoot {
-			absDst = "/"
-		}
-		// Ensure absolute path even for defaults
-		absDst, err = filepath.Abs(absDst)
-		if err != nil {
-			logger.Fatalf("Error resolving destination path: %v", err)
-		}
+		absDst = getDefaultDest()
 	}
 
 	// Safety check: prevent operations where source and destination are the same
 	if absSrc == absDst {
 		logger.Fatalf("Error: source and destination directories are the same (%s). Operation canceled to prevent unintended modifications.", absSrc)
 	}
+	return absSrc, absDst
+}
 
-	cfg := Config{
-		Watch:    *watchFlag,
-		BinDirs:  binDirs,
-		Everyone: *everyoneFlag,
+// validateSource checks if the source directory exists and is valid.
+func validateSource(src string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("accessing source directory %s: %v", src, err)
 	}
+	if !info.IsDir() {
+		return fmt.Errorf("source path %s is not a directory", src)
+	}
+	return nil
+}
 
-	// 4. Setup State File Path
-	// absSrc is absolute, so stateFilePath is absolute.
-	stateFilePath := filepath.Join(absSrc, ".etcdotica")
+// getDefaultDest returns the default destination based on the current user.
+func getDefaultDest() string {
+	currentUser, err := user.Current()
+	if err != nil {
+		logger.Fatalf("Error getting current user info: %v", err)
+	}
+	path := currentUser.HomeDir
+	if currentUser.Uid == "0" {
+		path = "/"
+	}
+	// Ensure absolute path even for defaults
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		logger.Fatalf("Error resolving default destination: %v", err)
+	}
+	return abs
+}
 
-	// 5. Run Loop
-	// Cache stores metadata to detect changes in watch mode
+// runLoop executes the main synchronization loop.
+func runLoop(cfg Config, stateFilePath string) {
+	// Cache stores metadata to detect changes in watch mode.
 	metaCache := make(map[string]fileMeta)
 
 	// State cache variables to avoid re-parsing the state file if it hasn't changed.
@@ -183,117 +216,124 @@ func main() {
 		cachedStateMeta fileMeta
 	)
 
+	// Iteration counter for periodic full scans.
+	var iterationCount int
+
 	for {
-		// Open the state file with read/write permissions. Create if it doesn't exist.
-		// We hold the file handle and lock throughout the entire sync process to prevent race conditions.
-		// If the source directory is transiently unavailable (e.g. network mount), this will fail.
-		stateFile, err := os.OpenFile(stateFilePath, os.O_RDWR|os.O_CREATE, 0666)
-		if err != nil {
-			logger.Printf("Error opening state file: %v", err)
-			if !cfg.Watch {
-				os.Exit(1)
-			}
-			// In watch mode, if source dir is missing/unreachable, wait and retry.
-			time.Sleep(watchRetryInterval)
-			continue
-		}
-
-		// Acquire an exclusive lock immediately. This blocks until the lock is obtained.
-		if err := syscall.Flock(int(stateFile.Fd()), syscall.LOCK_EX); err != nil {
-			logger.Printf("Error locking state file: %v", err)
-			stateFile.Close()
-			if !cfg.Watch {
-				os.Exit(1)
-			}
-			time.Sleep(watchRetryInterval)
-			continue
-		}
-
-		// Ensure correct ownership if running as root
-		ensureStateOwnership(stateFile, stateFilePath)
-
-		// 6. Load or reuse State
-		// We perform this check strictly after acquiring the lock to ensure atomicity.
-		// We use statErr to distinctly track the success of this specific operation.
-		stateFileInfo, statErr := stateFile.Stat()
-		var currentState map[string]struct{}
-
-		// We check `cachedState != nil` to ensure we don't use an empty cache on the very first run.
-		// Skip re-parsing if the file metadata (mtime/size) remains identical.
-		if statErr == nil && cachedState != nil &&
-			stateFileInfo.ModTime().Equal(cachedStateMeta.ModTime) &&
-			stateFileInfo.Size() == cachedStateMeta.Size {
-			currentState = cachedState
-		} else {
-			// Cache miss, first run, or file changed: Read from the beginning
-			if _, err := stateFile.Seek(0, 0); err != nil {
-				logger.Printf("Error seeking state file: %v", err)
-				stateFile.Close()
-				if !cfg.Watch {
-					os.Exit(1)
-				}
-				time.Sleep(watchRetryInterval)
-				continue
-			}
-
-			currentState, err = loadState(stateFile)
-			if err != nil {
-				// If load fails (e.g. corruption), we assume empty state for THIS run.
-				// We log a warning so the user knows why pruning might be behaving as if the state is empty.
-				logger.Printf("Warning: failed to parse state file, assuming empty state: %v", err)
-				currentState = make(map[string]struct{})
-			}
-
-			// Update cache unconditionally if Stat succeeded.
-			// Even if loadState returned an error (and we are using an empty map),
-			// this result is authoritative for this specific file version (Mtime/Size).
-			// If the file is broken, we cache the "broken" (empty) state.
-			// Next iteration, if Mtime/Size is the same, we skip parsing and reuse the empty state.
-			if statErr == nil {
-				cachedState = currentState
-				cachedStateMeta = fileMeta{
-					ModTime: stateFileInfo.ModTime(),
-					Size:    stateFileInfo.Size(),
-				}
-			} else {
-				// If Stat failed, we can't reliably cache this result for the future
-				// because we don't know the keys (time/size) to check against.
-				cachedState = nil
-			}
-		}
-
-		// Ensure executable bits are set in specified bin directories before syncing
-		ensureExecBits(absSrc, cfg.BinDirs, processUmask)
-
-		// Perform Sync
-		newState, changed, err := runSync(absSrc, absDst, cfg, currentState, metaCache, processUmask)
-		if err != nil {
-			logger.Printf("Sync error: %v", err)
-			stateFile.Close() // Release lock
-			if !cfg.Watch {
-				os.Exit(1)
-			}
-		} else {
-			// Save State only if changes occurred
-			if changed {
-				if err := saveState(stateFile, newState); err != nil {
-					logger.Printf("Error saving state: %v", err)
-				}
-				// We do NOT update the cache here.
-				// If we wrote to the file, its mtime/size on disk has changed.
-				// On the next iteration, the check at the top of the loop will fail (mismatch),
-				// causing a fresh read. This ensures strict consistency without complex cache
-				// invalidation logic here.
-			}
-			stateFile.Close() // Release lock
-		}
+		success := syncIteration(cfg, stateFilePath, &cachedState, &cachedStateMeta, metaCache)
 
 		if !cfg.Watch {
+			if !success {
+				os.Exit(1) // Standard practice: exit with error code in one-shot mode
+			}
 			break
 		}
 
 		time.Sleep(watchRetryInterval)
+
+		// Increment counter and check if we should drop the cache.
+		iterationCount++
+		if iterationCount >= fullScanIterations {
+			// Dropping the cache forces the syncer to bypass the "source unchanged" optimization
+			// and strictly compare source vs destination metadata (mtime, size, perms).
+			// This detects and reverts external modifications to destination files.
+			metaCache = make(map[string]fileMeta)
+			iterationCount = 0
+		}
 	}
+}
+
+// syncIteration performs a single pass of synchronization.
+// Returns true if successful (or recoverable), false if a fatal error occurred.
+func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]struct{}, cachedStateMeta *fileMeta, metaCache map[string]fileMeta) bool {
+	// Open the state file with read/write permissions.
+	// We hold the file handle and lock throughout the entire sync process to prevent race conditions.
+	// If the source directory is transiently unavailable (e.g. network mount), this will fail.
+	stateFile, err := openAndLockState(stateFilePath)
+	if err != nil {
+		logger.Printf("Error accessing state file: %v", err)
+		return false
+	}
+	defer stateFile.Close() // Releases lock
+
+	// Ensure correct ownership if running as root
+	ensureStateOwnership(stateFile, stateFilePath)
+
+	// Load previous state (handling cache hits)
+	currentState, err := loadStateWithCache(stateFile, cachedState, cachedStateMeta)
+	if err != nil {
+		// If load fails (e.g. corruption), we assume empty state for THIS run.
+		// We log a warning so the user knows why pruning might be behaving as if the state is empty.
+		logger.Printf("Warning: failed to parse state file, assuming empty state: %v", err)
+	}
+
+	// Ensure executable bits are set in specified bin directories before syncing
+	ensureExecBits(cfg.Src, cfg.BinDirs, cfg.ProcessUmask)
+
+	// Perform Sync
+	s := newSyncer(cfg, currentState, metaCache)
+	if err := s.run(); err != nil {
+		logger.Printf("Sync error: %v", err)
+		return false
+	}
+
+	// Save State only if changes occurred.
+	// We do NOT update the cache here. If we wrote to the file, its mtime/size on disk has changed.
+	// On the next iteration, the check at the top of the loop will fail (mismatch), causing a fresh read.
+	if s.changed {
+		if err := saveState(stateFile, s.newState); err != nil {
+			logger.Printf("Error saving state: %v", err)
+		}
+	}
+	return true
+}
+
+// openAndLockState opens the state file and acquires an exclusive lock.
+func openAndLockState(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return nil, err
+	}
+	// Acquire an exclusive lock immediately. This blocks until the lock is obtained.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("locking state file: %v", err)
+	}
+	return f, nil
+}
+
+// loadStateWithCache loads the state, using cached values if the file hasn't changed.
+func loadStateWithCache(f *os.File, cachedState *map[string]struct{}, cachedMeta *fileMeta) (map[string]struct{}, error) {
+	info, statErr := f.Stat()
+	if statErr != nil {
+		*cachedState = nil
+		return make(map[string]struct{}), statErr
+	}
+
+	// We check `cachedState != nil` to ensure we don't use an empty cache on the very first run.
+	if *cachedState != nil &&
+		info.ModTime().Equal(cachedMeta.ModTime) &&
+		info.Size() == cachedMeta.Size {
+		return *cachedState, nil
+	}
+
+	// Cache miss, first run, or file changed: Read from the beginning
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil, fmt.Errorf("seeking state file: %v", err)
+	}
+
+	state, err := loadState(f)
+	if err == nil {
+		// Update cache
+		*cachedState = state
+		*cachedMeta = fileMeta{ModTime: info.ModTime(), Size: info.Size()}
+	} else {
+		// If Load failed, we can't reliably cache this result.
+		*cachedState = nil
+		state = make(map[string]struct{}) // Return empty state on failure so logic proceeds
+	}
+
+	return state, err
 }
 
 // ensureExecBits iterates over provided directories and ensures files have
@@ -302,326 +342,331 @@ func ensureExecBits(srcRoot string, binDirs []string, umask os.FileMode) {
 	if len(binDirs) == 0 {
 		return
 	}
-
 	// Calculate the executable bits we want to enforce.
 	// 0111 are the standard executable bits for User, Group, Other.
 	// We mask them with the inverse of the umask.
-	// Example: if umask is 077, ^umask masks out Group and Other, so we only enforce User exec (0100).
 	targetModeBits := os.FileMode(0111) & ^umask
 
 	for _, relDir := range binDirs {
 		absDir := filepath.Join(srcRoot, relDir)
-
-		// Check if the directory exists; if not, just skip it.
-		info, err := os.Stat(absDir)
-		if err != nil || !info.IsDir() {
+		if info, err := os.Stat(absDir); err != nil || !info.IsDir() {
 			continue
 		}
-
-		// Walk the directory to process files
-		err = filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				// Skip unreadable files/directories
-				return nil
-			}
-
-			// We only care about ensuring executable bits on files
-			if info.IsDir() {
-				return nil
-			}
-
-			// filepath.Walk uses Lstat. We use Stat here to follow symlinks.
-			// If a symlink exists in the binDir, we generally want the target to be executable.
-			realInfo, err := os.Stat(path)
-			if err != nil {
-				return nil
-			}
-
-			if realInfo.IsDir() {
-				return nil
-			}
-
-			currentMode := realInfo.Mode()
-
-			// Check if the required executable bits are present.
-			// (currentMode & targetModeBits) == targetModeBits implies all bits in targetModeBits are set.
-			// If they are already set, we skip the Chmod operation.
-			if currentMode&targetModeBits != targetModeBits {
-				// We don't unset any bits; we only add the required ones.
-				newMode := currentMode | targetModeBits
-				if err := os.Chmod(path, newMode); err != nil {
-					logger.Printf("Warning: failed to set exec bit on %s: %v", path, err)
-				}
-			}
-			return nil
-		})
-
-		if err != nil {
-			logger.Printf("Warning: error scanning bindir %s: %v", absDir, err)
-		}
+		processExecDir(absDir, targetModeBits)
 	}
 }
 
-// runSync performs the core synchronization logic.
-func runSync(src, dst string, cfg Config, oldState map[string]struct{}, metaCache map[string]fileMeta, umask os.FileMode) (map[string]struct{}, bool, error) {
-	newState := make(map[string]struct{})
-	processedFiles := make(map[string]bool)
-	changed := false
-
-	// Walk Source
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+// processExecDir walks a single bin directory.
+func processExecDir(dir string, targetBits os.FileMode) {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return nil // Skip unreadable
 		}
-
-		// Calculate relative path
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-
-		if relPath == "." {
+		if info.IsDir() {
 			return nil
 		}
-
-		// Handle .etcdotica
-		if relPath == ".etcdotica" {
-			if info.IsDir() {
-				return fmt.Errorf("conflict: .etcdotica source path is a directory, expected state file")
-			}
-			return nil
-		}
-
-		// Ignore .git directory
-		if info.IsDir() && info.Name() == ".git" {
-			return filepath.SkipDir
-		}
-
-		// Resolve Symlinks
-		// filepath.Walk uses Lstat (gets link info). We must use Stat (follow link)
-		// to get the actual file info for correct mtime comparison and permission copying.
+		// filepath.Walk uses Lstat. We use Stat here to follow symlinks.
 		realInfo, err := os.Stat(path)
-		if err != nil {
-			logger.Printf("Warning: skipping unreadable file or broken link %s: %v", relPath, err)
-			// Mark processed to prevent pruning on read error
-			processedFiles[relPath] = true
+		if err != nil || realInfo.IsDir() {
 			return nil
 		}
 
-		targetPath := filepath.Join(dst, relPath)
-
-		// Capture current metadata
-		currentMeta := fileMeta{
-			ModTime: realInfo.ModTime(),
-			Size:    realInfo.Size(),
-			Mode:    realInfo.Mode(),
-		}
-
-		// Check if this is a Special Section File
-		if !realInfo.IsDir() {
-			sectionMatch := sectionFileRx.FindStringSubmatch(relPath)
-			if sectionMatch != nil {
-				// It is a section file.
-				// Group 1 is the target relative path (e.g. "etc/fstab")
-				// Group 2 is the section name (e.g. "external-disks")
-				targetRelPath := sectionMatch[1]
-				sectionName := sectionMatch[2]
-				targetAbsPath := filepath.Join(dst, targetRelPath)
-
-				// We treat the section source file as "processed" so it is not pruned,
-				// but we do NOT copy it as a file to the destination.
-				// Instead, we merge its content into the target file.
-				newState[relPath] = struct{}{}
-				processedFiles[relPath] = true
-
-				// Watch optimization for section files: skip processing if the source file
-				// has not changed since the last loop iteration.
-				if cfg.Watch {
-					lastMeta, known := metaCache[path]
-					if known &&
-						lastMeta.ModTime.Equal(currentMeta.ModTime) &&
-						lastMeta.Size == currentMeta.Size &&
-						lastMeta.Mode == currentMeta.Mode {
-						return nil
-					}
-					metaCache[path] = currentMeta
-				}
-
-				// Perform the Merge
-				didChange, err := mergeSection(path, targetAbsPath, sectionName, realInfo, umask, cfg.Everyone)
-				if err != nil {
-					logger.Printf("Failed to merge section %s into %s: %v", sectionName, targetAbsPath, err)
-				} else if didChange {
-					changed = true
-				}
-				return nil
+		// Check if the required executable bits are present.
+		if realInfo.Mode()&targetBits != targetBits {
+			// We don't unset any bits; we only add the required ones.
+			if err := os.Chmod(path, realInfo.Mode()|targetBits); err != nil {
+				logger.Printf("Warning: failed to set exec bit on %s: %v", path, err)
 			}
 		}
-
-		// Watch optimization for standard files: skip processing if the source metadata
-		// matches our cache and the file was already successfully recorded in the state.
-		if cfg.Watch {
-			lastMeta, known := metaCache[path]
-			if known &&
-				lastMeta.ModTime.Equal(currentMeta.ModTime) &&
-				lastMeta.Size == currentMeta.Size &&
-				lastMeta.Mode == currentMeta.Mode {
-				// We still need to record it in newState to prevent pruning
-				if _, ok := oldState[relPath]; ok {
-					newState[relPath] = struct{}{}
-					processedFiles[relPath] = true
-					return nil
-				}
-			}
-			metaCache[path] = currentMeta
-		}
-
-		// Calculate the expected permissions
-		var expectedPerms os.FileMode
-		if cfg.Everyone {
-			// Start with base read for everyone (0444)
-			permBits := os.FileMode(0444)
-
-			// If source has User Write (0200), add Write for User, Group, Other users (0222)
-			if currentMeta.Mode&0200 != 0 {
-				permBits |= 0222
-			}
-
-			// If source has User Exec (0100), add Exec for User, Group, Other users (0111)
-			if currentMeta.Mode&0100 != 0 {
-				permBits |= 0111
-			}
-
-			// Apply umask
-			expectedPerms = permBits & ^umask
-		} else {
-			// Standard behavior: mask source perms with umask
-			expectedPerms = currentMeta.Mode.Perm() & ^umask
-		}
-
-		// Handle Directory
-		if realInfo.IsDir() {
-			// MkdirAll will create the directory and any necessary parents.
-			// If the path already exists and is a directory, it does nothing.
-			// If the path exists and is a file, it will return an error.
-			// If it exists (even as a symlink to a dir), MkdirAll returns nil (success).
-			if err := os.MkdirAll(targetPath, expectedPerms); err != nil {
-				logger.Printf("Skipping source directory: failed to create %s: %v", targetPath, err)
-				return filepath.SkipDir
-			}
-			// Note that we do not prune directories or modify permissions on existing ones.
-			return nil
-		}
-
-		// Handle File
-		processedFiles[relPath] = true
-
-		// Use Lstat to check destination state so we can detect symlinks
-		dstInfo, err := os.Lstat(targetPath)
-		dstExists := err == nil
-
-		if dstExists {
-			// If destination is a symlink, we must remove it.
-			// - If it links to a file: writing would overwrite the target (bad).
-			// - If it links to a dir: we want to replace it with the source file.
-			if dstInfo.Mode()&os.ModeSymlink != 0 {
-				if err := os.Remove(targetPath); err != nil {
-					logger.Printf("Error removing destination symlink %s: %v", targetPath, err)
-					return nil
-				}
-				// We treated the symlink as an invalid state and removed it.
-				// Now we proceed as if the file does not exist.
-				dstExists = false
-			} else if dstInfo.IsDir() {
-				// Conflict Check: Dest exists and is a directory
-				logger.Printf("Conflict: src is file, dst is dir. Skipping %s", targetPath)
-				return nil
-			}
-		}
-
-		// Record state
-		newState[relPath] = struct{}{}
-
-		// 1. File does not exist: Full install
-		if !dstExists {
-			if err := installFile(path, targetPath, realInfo, expectedPerms); err != nil {
-				logger.Printf("Failed to install %s: %v", targetPath, err)
-				return nil
-			}
-			changed = true
-			return nil
-		}
-
-		// 2. File exists: Check for any mismatch (Size, Mtime, or Permissions).
-		// If anything is out of sync, we perform a full reinstall of the file.
-		// This is safer than separate checks (like a standalone chmod) as it mitigates
-		// potential TOCTOU vulnerabilities where the file could be replaced with a
-		// symlink between the check and the operation.
-		if currentMeta.Size != dstInfo.Size() ||
-			!currentMeta.ModTime.Equal(dstInfo.ModTime()) ||
-			dstInfo.Mode().Perm() != expectedPerms {
-
-			if err := installFile(path, targetPath, realInfo, expectedPerms); err != nil {
-				logger.Printf("Failed to update %s: %v", targetPath, err)
-				return nil
-			}
-			changed = true
-		}
-
 		return nil
 	})
-
 	if err != nil {
-		return nil, false, err
+		logger.Printf("Warning: error scanning bindir %s: %v", dir, err)
+	}
+}
+
+// syncer holds the context for a synchronization operation.
+type syncer struct {
+	cfg            Config
+	oldState       map[string]struct{}
+	metaCache      map[string]fileMeta
+	newState       map[string]struct{}
+	processedFiles map[string]bool
+	changed        bool
+}
+
+func newSyncer(cfg Config, oldState map[string]struct{}, metaCache map[string]fileMeta) *syncer {
+	return &syncer{
+		cfg:            cfg,
+		oldState:       oldState,
+		metaCache:      metaCache,
+		newState:       make(map[string]struct{}),
+		processedFiles: make(map[string]bool),
+	}
+}
+
+// run executes the sync logic: walk source, then prune orphans.
+func (s *syncer) run() error {
+	if err := filepath.Walk(s.cfg.Src, s.visit); err != nil {
+		return err
+	}
+	s.prune()
+	return nil
+}
+
+// visit is the filepath.Walk callback.
+func (s *syncer) visit(path string, info os.FileInfo, err error) error {
+	if err != nil {
+		return err
 	}
 
-	// Pruning
-	for oldRelPath := range oldState {
-		if !processedFiles[oldRelPath] {
-			// Check if this is a section file from the previous state
-			sectionMatch := sectionFileRx.FindStringSubmatch(oldRelPath)
-			if sectionMatch != nil {
-				// It was a section file. We need to remove the section from the target.
-				targetRelPath := sectionMatch[1]
-				sectionName := sectionMatch[2]
-				targetAbsPath := filepath.Join(dst, targetRelPath)
+	relPath, err := filepath.Rel(s.cfg.Src, path)
+	if err != nil {
+		return err
+	}
 
-				didChange, err := removeSection(targetAbsPath, sectionName)
-				if err != nil {
-					logger.Printf("Failed to remove section %s from %s: %v", sectionName, targetAbsPath, err)
-				} else if didChange {
-					changed = true
-				}
-				// We handled this entry (or failed to), so we skip the generic file removal
-				continue
-			}
+	if shouldSkip(relPath, info) {
+		if info.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
 
-			targetPath := filepath.Join(dst, oldRelPath)
+	// Resolve Symlinks
+	// filepath.Walk uses Lstat (gets link info). We must use Stat (follow link)
+	// to get the actual file info for correct mtime comparison and permission copying.
+	realInfo, err := os.Stat(path)
+	if err != nil {
+		logger.Printf("Warning: skipping unreadable file or broken link %s: %v", relPath, err)
+		// Mark processed to prevent pruning on read error
+		s.processedFiles[relPath] = true
+		return nil
+	}
 
-			// Remove orphaned file. Do not remove directories.
-			err := os.Remove(targetPath)
-			if err == nil {
-				changed = true
-			} else if !os.IsNotExist(err) {
-				logger.Printf("Failed to remove orphaned file %s: %v", targetPath, err)
-			}
+	if realInfo.IsDir() {
+		return s.handleDirectory(relPath, realInfo)
+	}
+
+	return s.handleFile(path, relPath, realInfo)
+}
+
+// shouldSkip checks for .git, .etcdotica, or root dir.
+func shouldSkip(relPath string, info os.FileInfo) bool {
+	if relPath == "." {
+		return true
+	}
+	if relPath == ".etcdotica" {
+		return true
+	}
+	if info.IsDir() && info.Name() == ".git" {
+		return true
+	}
+	return false
+}
+
+// handleDirectory creates the directory at the destination.
+func (s *syncer) handleDirectory(relPath string, info os.FileInfo) error {
+	targetPath := filepath.Join(s.cfg.Dst, relPath)
+	expectedPerms := calculatePerms(info.Mode(), s.cfg.ProcessUmask, s.cfg.Everyone)
+
+	// MkdirAll will create the directory and any necessary parents.
+	// Note that we do not prune directories or modify permissions on existing ones.
+	if err := os.MkdirAll(targetPath, expectedPerms); err != nil {
+		logger.Printf("Skipping source directory: failed to create %s: %v", targetPath, err)
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// handleFile delegates to section handling or regular file handling.
+func (s *syncer) handleFile(srcPath, relPath string, info os.FileInfo) error {
+	// Check for section file
+	if match := sectionFileRx.FindStringSubmatch(relPath); match != nil {
+		return s.processSection(srcPath, relPath, match[1], match[2], info)
+	}
+	return s.processRegularFile(srcPath, relPath, info)
+}
+
+// processSection handles merging section files.
+func (s *syncer) processSection(srcPath, relPath, targetRel, sectionName string, info os.FileInfo) error {
+	targetAbsPath := filepath.Join(s.cfg.Dst, targetRel)
+
+	// We treat the section source file as "processed" so it is not pruned,
+	// but we do NOT copy it as a file to the destination.
+	s.newState[relPath] = struct{}{}
+	s.processedFiles[relPath] = true
+
+	// Watch optimization: skip if source hasn't changed
+	if s.checkCache(srcPath, info) {
+		return nil
+	}
+
+	didChange, err := mergeSection(srcPath, targetAbsPath, sectionName, info, s.cfg.ProcessUmask, s.cfg.Everyone)
+	if err != nil {
+		logger.Printf("Failed to merge section %s into %s: %v", sectionName, targetAbsPath, err)
+		// On error, invalidate cache so we retry this file on the next watch cycle
+		delete(s.metaCache, srcPath)
+	} else if didChange {
+		s.changed = true
+	}
+	return nil
+}
+
+// processRegularFile handles copying or updating standard files.
+func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) error {
+	targetPath := filepath.Join(s.cfg.Dst, relPath)
+
+	// Watch optimization for standard files: skip processing if the source metadata
+	// matches our cache and the file was already successfully recorded in the state.
+	if s.checkCache(srcPath, info) {
+		if _, ok := s.oldState[relPath]; ok {
+			s.newState[relPath] = struct{}{}
+			s.processedFiles[relPath] = true
+			return nil
 		}
 	}
 
-	return newState, changed, nil
+	s.processedFiles[relPath] = true
+	s.newState[relPath] = struct{}{}
+
+	expectedPerms := calculatePerms(info.Mode(), s.cfg.ProcessUmask, s.cfg.Everyone)
+
+	// If destination file differs, perform a full reinstall/update.
+	// This is safer than separate checks (like a standalone chmod) as it mitigates TOCTOU.
+	shouldUpdate, err := s.needsUpdate(targetPath, info, expectedPerms)
+	if err != nil {
+		logger.Printf("Error checking destination state for %s: %v", targetPath, err)
+		// On error, invalidate cache so we retry this file on the next watch cycle
+		delete(s.metaCache, srcPath)
+		return nil
+	}
+
+	if shouldUpdate {
+		if err := installFile(srcPath, targetPath, info, expectedPerms); err != nil {
+			logger.Printf("Failed to update/install %s: %v", targetPath, err)
+			// On error, invalidate cache so we retry this file on the next watch cycle
+			delete(s.metaCache, srcPath)
+		} else {
+			s.changed = true
+		}
+	}
+
+	return nil
+}
+
+// checkCache returns true if the file hasn't changed since last scan (Watch mode).
+func (s *syncer) checkCache(path string, info os.FileInfo) bool {
+	if !s.cfg.Watch {
+		return false
+	}
+	currentMeta := fileMeta{ModTime: info.ModTime(), Size: info.Size(), Mode: info.Mode()}
+	lastMeta, known := s.metaCache[path]
+	s.metaCache[path] = currentMeta
+
+	return known &&
+		lastMeta.ModTime.Equal(currentMeta.ModTime) &&
+		lastMeta.Size == currentMeta.Size &&
+		lastMeta.Mode == currentMeta.Mode
+}
+
+// calculatePerms determines the target file permissions.
+func calculatePerms(srcMode os.FileMode, umask os.FileMode, everyone bool) os.FileMode {
+	if !everyone {
+		// Standard behavior: mask source perms with umask
+		return srcMode.Perm() & ^umask
+	}
+	// Base read for everyone (0444)
+	permBits := os.FileMode(0444)
+
+	// Propagate write bit: if User Write (0200) -> add Write for all (0222)
+	if srcMode&0200 != 0 {
+		permBits |= 0222
+	}
+	// Propagate exec bit: if User Exec (0100) -> add Exec for all (0111)
+	if srcMode&0100 != 0 {
+		permBits |= 0111
+	}
+	return permBits & ^umask
+}
+
+// needsUpdate checks if the destination file needs to be replaced.
+// It returns true if an update is required, or false if the destination is up to date.
+// It returns an error if the destination state cannot be determined or resolved (e.g. symlink removal failure).
+func (s *syncer) needsUpdate(dstPath string, srcInfo os.FileInfo, expectedPerms os.FileMode) (bool, error) {
+	// Use Lstat to check destination state so we can detect symlinks
+	dstInfo, err := os.Lstat(dstPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil // Destination does not exist, install needed
+		}
+		return false, err // Error accessing destination
+	}
+
+	// If destination is a symlink, we must remove it.
+	// - If it links to a file: writing would overwrite the target (bad).
+	// - If it links to a dir: we want to replace it with the source file.
+	if dstInfo.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(dstPath); err != nil {
+			return false, fmt.Errorf("removing destination symlink: %v", err)
+		}
+		// We treated the symlink as an invalid state. Proceed to update.
+		return true, nil
+	}
+
+	// Conflict Check: Dest exists and is a directory
+	if dstInfo.IsDir() {
+		return false, fmt.Errorf("conflict: src is file, dst is dir")
+	}
+
+	// Check Size, Mtime, Permissions
+	return srcInfo.Size() != dstInfo.Size() ||
+		!srcInfo.ModTime().Equal(dstInfo.ModTime()) ||
+		dstInfo.Mode().Perm() != expectedPerms, nil
+}
+
+// prune removes files or sections that are no longer in the source.
+func (s *syncer) prune() {
+	for oldRelPath := range s.oldState {
+		if s.processedFiles[oldRelPath] {
+			continue
+		}
+
+		// Check if it's a section file
+		if match := sectionFileRx.FindStringSubmatch(oldRelPath); match != nil {
+			targetPath := filepath.Join(s.cfg.Dst, match[1])
+			if chg, err := removeSection(targetPath, match[2]); err != nil {
+				logger.Printf("Failed to remove section %s from %s: %v", match[2], targetPath, err)
+			} else if chg {
+				s.changed = true
+			}
+			continue
+		}
+
+		// Regular file
+		targetPath := filepath.Join(s.cfg.Dst, oldRelPath)
+		// Remove orphaned file. Do not remove directories.
+		if err := os.Remove(targetPath); err == nil {
+			s.changed = true
+		} else if !os.IsNotExist(err) {
+			logger.Printf("Failed to remove orphaned file %s: %v", targetPath, err)
+		}
+	}
 }
 
 // installFile copies content and forces the specific calculated permissions.
 // It acquires an exclusive lock on the destination file during the write operation
 // to prevent concurrent modifications.
-// It also performs a post-write verification to mitigate TOCTOU race conditions
-// where the file might be modified between the close and the Chtimes call.
 func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	s, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
+	// Acquire Shared Lock on Source
+	if err := syscall.Flock(int(s.Fd()), syscall.LOCK_SH); err != nil {
+		return fmt.Errorf("locking source file: %v", err)
+	}
 
 	// 1. Create/Write file.
 	// We use O_WRONLY|O_CREATE but explicitly AVOID O_TRUNC here.
@@ -632,84 +677,95 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 		return err
 	}
 
-	// 2. Acquire Exclusive Lock
-	// We must lock before we modify the content (truncate/write).
+	// 2. Acquire Exclusive Lock. Must lock before modifying content.
 	if err := syscall.Flock(int(d.Fd()), syscall.LOCK_EX); err != nil {
 		d.Close()
 		return err
 	}
 
-	// 3. Truncate
-	// Now that we possess the exclusive lock, it is safe to reset the file size.
+	// 3. Truncate. Now that we possess the exclusive lock, it is safe to reset file size.
 	if err := d.Truncate(0); err != nil {
 		d.Close()
 		return err
 	}
 
-	// Prepare hashing to capture what we intend to write
-	srcHasher := sha256.New()
-	writer := io.MultiWriter(d, srcHasher)
-
-	// 4. Copy Content (Write to file + Hash)
-	if _, err := io.Copy(writer, s); err != nil {
+	// 4. Copy Content
+	if _, err := io.Copy(d, s); err != nil {
 		d.Close()
 		return err
 	}
 
 	// 5. Sync Permissions
-	// OpenFile only applies mode on creation. If the file existed, mode is ignored.
-	// We use the file descriptor to apply permissions to ensure we are modifying
-	// the exact file we wrote to, avoiding potential symlink-swapping races.
+	// OpenFile only applies mode on creation. Use Fd to be safe against symlink races.
 	if err := d.Chmod(perm); err != nil {
-		logger.Printf("Warning: failed to chmod %s: %v", dst, err)
+		d.Close()
+		return err
 	}
 
 	// 6. Close (Releases Lock)
-	// Explicitly closing allows us to check for write errors, and implicitly releases the flock.
 	if err := d.Close(); err != nil {
 		return err
 	}
 
 	// 7. Sync Mtime
 	// This is the critical moment where a race can happen.
-	// We set the time to match the source.
 	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
 		logger.Printf("Warning: failed to set mtime on %s: %v", dst, err)
 	}
 
 	// 8. Verification (Mitigate TOCTOU)
-	// We re-open the file with a shared lock to read back what is on disk.
-	// If it differs from what we just wrote (srcHasher), it means an external
-	// process modified it during the window between Close() and Chtimes() (or slightly after).
-	// If we detect this, we touch the file to current time. This ensures the
-	// ModTime differs from the Source ModTime, forcing a sync on the next run.
+	return verifyContent(s, dst)
+}
 
-	dVerify, err := os.Open(dst)
+// verifyContent checks if the file on disk matches the source file byte-by-byte.
+// If content differs (modification between Close and Chtimes), it touches the file
+// to force a resync on the next run.
+func verifyContent(src *os.File, dstPath string) error {
+	// Reset source cursor
+	if _, err := src.Seek(0, 0); err != nil {
+		return fmt.Errorf("seeking source file for verification: %v", err)
+	}
+
+	d, err := os.Open(dstPath)
 	if err != nil {
-		// If we can't open for verification, we assume something is wrong.
-		return fmt.Errorf("verification failed: cannot open %s: %v", dst, err)
+		return fmt.Errorf("verify open failed: %v", err)
 	}
-	defer dVerify.Close()
+	defer d.Close()
 
-	if err := syscall.Flock(int(dVerify.Fd()), syscall.LOCK_SH); err != nil {
-		return fmt.Errorf("verification failed: cannot lock %s: %v", dst, err)
-	}
-
-	dstHasher := sha256.New()
-	if _, err := io.Copy(dstHasher, dVerify); err != nil {
-		return fmt.Errorf("verification failed: cannot read %s: %v", dst, err)
+	if err := syscall.Flock(int(d.Fd()), syscall.LOCK_SH); err != nil {
+		return fmt.Errorf("verify lock failed: %v", err)
 	}
 
-	// We don't need to explicitly unlock; Close() releases the lock.
+	const chunkSize = 64 * 1024
+	srcBuf := make([]byte, chunkSize)
+	dstBuf := make([]byte, chunkSize)
 
-	if !bytes.Equal(srcHasher.Sum(nil), dstHasher.Sum(nil)) {
-		logger.Printf("Warning: content mismatch detected for %s after sync. Possible concurrent modification. updating mtime to force future sync.", dst)
-		now := time.Now()
-		if err := os.Chtimes(dst, now, now); err != nil {
-			logger.Printf("Error: failed to touch %s after mismatch: %v", dst, err)
+	for {
+		n1, err1 := src.Read(srcBuf)
+		n2, err2 := d.Read(dstBuf)
+
+		if err1 != nil || err2 != nil {
+			if err1 == io.EOF && err2 == io.EOF {
+				return nil // Files match
+			}
+			if err1 == io.EOF || err2 == io.EOF {
+				break // Mismatch (length differs)
+			}
+			// Actual read error
+			return fmt.Errorf("verify read error: src=%v, dst=%v", err1, err2)
+		}
+
+		if n1 != n2 || !bytes.Equal(srcBuf[:n1], dstBuf[:n2]) {
+			break // Mismatch (content differs)
 		}
 	}
 
+	// Mismatch detected
+	logger.Printf("Warning: content mismatch for %s. Updating mtime to force sync.", dstPath)
+	now := time.Now()
+	if err := os.Chtimes(dstPath, now, now); err != nil {
+		return fmt.Errorf("failed to update mtime after content mismatch: %v", err)
+	}
 	return nil
 }
 
@@ -723,59 +779,21 @@ type chunk struct {
 // mergeSection reads the source section file and merges it into the target file.
 // It respects the alphabetical ordering of sections and safety checks for broken tags.
 func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, umask os.FileMode, everyone bool) (bool, error) {
-	// 1. Read the new section content from source
-	srcBytes, err := os.ReadFile(srcPath)
+	srcLines, err := readLines(srcPath)
 	if err != nil {
 		return false, err
 	}
-	srcLines := strings.Split(string(srcBytes), "\n")
-	// Trim trailing empty line if resulting from split
-	if len(srcLines) > 0 && srcLines[len(srcLines)-1] == "" {
-		srcLines = srcLines[:len(srcLines)-1]
+
+	// Check for directory conflict at destination.
+	if info, err := os.Stat(dstPath); err == nil && info.IsDir() {
+		return false, fmt.Errorf("conflict: target %s is a directory", dstPath)
 	}
 
-	// 2. Determine Expected Permissions
-	// If the destination file exists, we want to preserve its current permissions
-	// (sanitized by umask). If it doesn't exist, we calculate permissions based
-	// on the source file and configuration, similar to runSync.
-	var expectedPerms os.FileMode
+	// Determine Expected Permissions
+	// We strictly enforce permissions based on the source, overwriting any existing destination permissions.
+	expectedPerms := calculatePerms(srcInfo.Mode(), umask, everyone)
 
-	// We use os.Stat (follows symlinks) because if it's a symlink, we care about the target's mode.
-	dstInfo, err := os.Stat(dstPath)
-	if err == nil {
-		// Conflict Check: If destination exists and is a directory, we cannot merge into it.
-		if dstInfo.IsDir() {
-			return false, fmt.Errorf("conflict: target path %s is a directory", dstPath)
-		}
-		// Dest exists: Keep existing mode, but strip umask bits
-		expectedPerms = dstInfo.Mode().Perm() & ^umask
-	} else {
-		// Dest does not exist (or is broken link): Calculate from source
-		if everyone {
-			// Start with base read for everyone (0444)
-			permBits := os.FileMode(0444)
-
-			// If source has User Write (0200), add Write for User, Group, Other users (0222)
-			if srcInfo.Mode()&0200 != 0 {
-				permBits |= 0222
-			}
-
-			// If source has User Exec (0100), add Exec for User, Group, Other users (0111)
-			if srcInfo.Mode()&0100 != 0 {
-				permBits |= 0111
-			}
-
-			// Apply umask
-			expectedPerms = permBits & ^umask
-		} else {
-			// Standard behavior: mask source perms with umask
-			expectedPerms = srcInfo.Mode().Perm() & ^umask
-		}
-	}
-
-	// 3. Open Destination File (Read/Write, Create if missing)
-	// We need to lock it to prevent race conditions.
-	// os.OpenFile uses expectedPerms only if the file is created.
+	// Open Destination File (Read/Write, Create if missing)
 	f, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE, expectedPerms)
 	if err != nil {
 		return false, err
@@ -786,39 +804,73 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 		return false, err
 	}
 
-	// 4. Read existing content
-	// ReadAll reads from current offset (0)
 	content, err := io.ReadAll(f)
 	if err != nil {
 		return false, err
 	}
-	oldLines := strings.Split(string(content), "\n")
-	// Handle case where file is empty or ends with newline
-	if len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
-		oldLines = oldLines[:len(oldLines)-1]
+
+	newBytes, changed, err := computeMergedContent(content, srcLines, sectionName)
+	if err != nil {
+		return false, err
 	}
 
-	// 5. Parse Blocks
+	if changed {
+		if err := writeContent(f, newBytes); err != nil {
+			return false, err
+		}
+	}
+
+	// Enforce permissions.
+	// We do this regardless of content change to ensure the file complies with the desired mode.
+	// Changing permissions does not trigger the changed indicator.
+	if err := f.Chmod(expectedPerms); err != nil {
+		logger.Printf("Warning: failed to chmod %s: %v", dstPath, err)
+	}
+
+	return changed, nil
+}
+
+// readLines reads a file and splits it into lines.
+func readLines(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return splitLines(b), nil
+}
+
+// computeMergedContent parses existing content and merges the new section.
+func computeMergedContent(oldContent []byte, srcLines []string, sectionName string) ([]byte, bool, error) {
+	oldLines := splitLines(oldContent)
+
 	blocks, err := parseBlocks(oldLines, sectionName)
 	if err != nil {
-		// If specific error (e.g. broken target section), we abort
-		return false, fmt.Errorf("parsing target file: %v", err)
+		return nil, false, err
 	}
-
-	// 6. Construct New Section Chunk
-	newSectionLines := make([]string, 0, len(srcLines)+2)
-	newSectionLines = append(newSectionLines, fmt.Sprintf("# BEGIN %s", sectionName))
-	newSectionLines = append(newSectionLines, srcLines...)
-	newSectionLines = append(newSectionLines, fmt.Sprintf("# END %s", sectionName))
 
 	newChunk := chunk{
 		isSection: true,
 		name:      sectionName,
-		lines:     newSectionLines,
+		lines:     wrapSection(srcLines, sectionName),
 	}
 
-	// 7. Merge Logic
-	var newBlocks []chunk
+	newBlocks := mergeBlocks(blocks, newChunk, sectionName)
+	newBytes := serializeBlocks(newBlocks)
+
+	return newBytes, !bytes.Equal(oldContent, newBytes), nil
+}
+
+func wrapSection(lines []string, name string) []string {
+	res := make([]string, 0, len(lines)+2)
+	res = append(res, fmt.Sprintf("# BEGIN %s", name))
+	res = append(res, lines...)
+	res = append(res, fmt.Sprintf("# END %s", name))
+	return res
+}
+
+// mergeBlocks inserts the new chunk into the correct position.
+func mergeBlocks(blocks []chunk, newChunk chunk, sectionName string) []chunk {
+	var out []chunk
 	inserted := false
 
 	// Strategy:
@@ -826,95 +878,69 @@ func mergeSection(srcPath, dstPath, sectionName string, srcInfo os.FileInfo, uma
 	// If we find our section -> Replace it.
 	// If we find a section strictly GREATER than ours -> Insert before it.
 	// If raw -> Keep.
+
 	for _, b := range blocks {
 		if inserted {
-			// Already inserted/replaced, just append the rest, skipping if it was the old version of our section
+			// Skip old version of the section if we encounter it later
 			if b.isSection && b.name == sectionName {
 				continue
 			}
-			newBlocks = append(newBlocks, b)
+			out = append(out, b)
 			continue
 		}
 
 		if b.isSection {
 			if b.name == sectionName {
-				// Found existing section: Replace
-				newBlocks = append(newBlocks, newChunk)
+				out = append(out, newChunk) // Replace
 				inserted = true
 			} else if sectionName < b.name {
 				// Found a section that comes alphabetically AFTER ours.
 				// We must insert ours BEFORE this one.
-				newBlocks = append(newBlocks, newChunk)
-				newBlocks = append(newBlocks, b)
+				out = append(out, newChunk)
+				out = append(out, b)
 				inserted = true
 			} else {
 				// Current section is smaller (before) ours. Keep looking.
-				newBlocks = append(newBlocks, b)
+				out = append(out, b)
 			}
 		} else {
 			// Raw text block
-			newBlocks = append(newBlocks, b)
+			out = append(out, b)
 		}
 	}
-
 	if !inserted {
 		// If we reached the end without inserting, append to the end
-		newBlocks = append(newBlocks, newChunk)
+		out = append(out, newChunk)
 	}
+	return out
+}
 
-	// 8. Serialize
+// serializeBlocks joins chunks back into bytes.
+func serializeBlocks(blocks []chunk) []byte {
 	var buf bytes.Buffer
-	for i, b := range newBlocks {
+	for _, b := range blocks {
 		for _, line := range b.lines {
 			buf.WriteString(line)
 			buf.WriteByte('\n')
 		}
-		// Try to avoid excessive newlines between sections if raw blocks are empty,
-		// but typically we just reconstruct exactly what was there.
-		// The simple reconstruction above puts a newline after every line.
-		// NOTE: If the original file had no trailing newline, this adds one.
-		_ = i
 	}
+	return buf.Bytes()
+}
 
-	// 9. Comparison and Write Back
-	// Skip the write if the merged content is identical to existing content.
-	newBytes := buf.Bytes()
-	contentChanged := !bytes.Equal(content, newBytes)
-
-	if contentChanged {
-		if err := f.Truncate(0); err != nil {
-			return false, err
-		}
-		if _, err := f.Seek(0, 0); err != nil {
-			return false, err
-		}
-		if _, err := f.Write(newBytes); err != nil {
-			return false, err
-		}
+// writeContent rewrites the file from the beginning.
+func writeContent(f *os.File, data []byte) error {
+	if err := f.Truncate(0); err != nil {
+		return err
 	}
-
-	// 10. Check and Sync Permissions
-	// Even if content matches, we must ensure permissions are correct (like runSync).
-	// We use f.Stat() and f.Chmod() which operate on the open file handle (and follow symlinks correctly).
-	// If dstPath is a symlink, f refers to the target file, so we chmod the target file.
-	currentStat, err := f.Stat()
-	if err == nil {
-		if currentStat.Mode().Perm() != expectedPerms {
-			if err := f.Chmod(expectedPerms); err != nil {
-				logger.Printf("Warning: failed to chmod %s: %v", dstPath, err)
-			} else {
-				// Mark as changed so state is saved
-				contentChanged = true
-			}
-		}
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
 	}
-
-	return contentChanged, nil
+	_, err := f.Write(data)
+	return err
 }
 
 // removeSection removes the named section from the target file.
 func removeSection(dstPath, sectionName string) (bool, error) {
-	// 1. Open File
 	f, err := os.OpenFile(dstPath, os.O_RDWR, 0666)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -928,23 +954,19 @@ func removeSection(dstPath, sectionName string) (bool, error) {
 		return false, err
 	}
 
-	// 2. Read Content
 	content, err := io.ReadAll(f)
 	if err != nil {
 		return false, err
 	}
-	lines := strings.Split(string(content), "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
 
-	// 3. Parse
-	blocks, err := parseBlocks(lines, sectionName)
+	oldLines := splitLines(content)
+
+	blocks, err := parseBlocks(oldLines, sectionName)
 	if err != nil {
 		return false, fmt.Errorf("parsing target file: %v", err)
 	}
 
-	// 4. Filter
+	// Filter out the section
 	var newBlocks []chunk
 	found := false
 	for _, b := range blocks {
@@ -959,28 +981,7 @@ func removeSection(dstPath, sectionName string) (bool, error) {
 		return false, nil
 	}
 
-	// 5. Serialize
-	var buf bytes.Buffer
-	for _, b := range newBlocks {
-		for _, line := range b.lines {
-			buf.WriteString(line)
-			buf.WriteByte('\n')
-		}
-	}
-
-	// 6. Write Back
-	newBytes := buf.Bytes()
-	if err := f.Truncate(0); err != nil {
-		return false, err
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		return false, err
-	}
-	if _, err := f.Write(newBytes); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return true, writeContent(f, serializeBlocks(newBlocks))
 }
 
 // parseBlocks reads lines and groups them into chunks (Raw vs Named Sections).
@@ -988,84 +989,93 @@ func removeSection(dstPath, sectionName string) (bool, error) {
 // Other malformed sections are treated as raw text to avoid destruction.
 func parseBlocks(lines []string, targetSectionName string) ([]chunk, error) {
 	var blocks []chunk
-
-	// Scan first to validate the target section isn't broken
-	// A broken target section (e.g. BEGIN X without END X) causes an abort.
-	// A broken unrelated section (e.g. BEGIN Y without END Y) is treated as raw text.
-	// To implement this, we identify valid ranges first.
-	type span struct {
-		start, end int // inclusive
-		name       string
-	}
-	validSections := []span{}
-
-	for i := 0; i < len(lines); i++ {
-		match := beginSectionRx.FindStringSubmatch(lines[i])
-		if match != nil {
-			name := match[1]
-			// Look ahead for END
-			foundEnd := -1
-			// Nested sections are not supported/expected, scan linearly
-			for j := i + 1; j < len(lines); j++ {
-				endMatch := endSectionRx.FindStringSubmatch(lines[j])
-				if endMatch != nil && endMatch[1] == name {
-					foundEnd = j
-					break
-				}
-				// If we see a BEGIN for the SAME name nested, that's definitely broken
-				beginMatch := beginSectionRx.FindStringSubmatch(lines[j])
-				if beginMatch != nil && beginMatch[1] == name {
-					break
-				}
-			}
-
-			if foundEnd != -1 {
-				validSections = append(validSections, span{i, foundEnd, name})
-				i = foundEnd // Advance outer loop
-			} else {
-				// Opening tag without closing tag
-				if name == targetSectionName {
-					return nil, fmt.Errorf("found opening tag for section '%s' at line %d but no closing tag", name, i+1)
-				}
-				// Treat as raw text
-			}
-		} else {
-			// Check for orphaned END tags of target
-			endMatch := endSectionRx.FindStringSubmatch(lines[i])
-			if endMatch != nil && endMatch[1] == targetSectionName {
-				return nil, fmt.Errorf("found orphaned closing tag for section '%s' at line %d", targetSectionName, i+1)
-			}
-		}
+	validSections, err := findValidSections(lines, targetSectionName)
+	if err != nil {
+		return nil, err
 	}
 
-	// Now build blocks based on valid sections
+	// Build blocks based on valid sections
 	lineIdx := 0
 	for _, sec := range validSections {
 		// Add raw text before this section
 		if sec.start > lineIdx {
-			blocks = append(blocks, chunk{
-				isSection: false,
-				lines:     lines[lineIdx:sec.start],
-			})
+			blocks = append(blocks, chunk{isSection: false, lines: lines[lineIdx:sec.start]})
 		}
 		// Add the section
-		blocks = append(blocks, chunk{
-			isSection: true,
-			name:      sec.name,
-			lines:     lines[sec.start : sec.end+1],
-		})
+		blocks = append(blocks, chunk{isSection: true, name: sec.name, lines: lines[sec.start : sec.end+1]})
 		lineIdx = sec.end + 1
 	}
 
 	// Add remaining raw text
 	if lineIdx < len(lines) {
-		blocks = append(blocks, chunk{
-			isSection: false,
-			lines:     lines[lineIdx:],
-		})
+		blocks = append(blocks, chunk{isSection: false, lines: lines[lineIdx:]})
 	}
-
 	return blocks, nil
+}
+
+type span struct {
+	start, end int
+	name       string
+}
+
+// findValidSections scans lines for valid BEGIN/END pairs.
+// CRITICAL: It returns an error if the target section has malformed tags (orphaned begin or end).
+// This prevents us from corrupting a file where the user might have manually edited the section tags.
+func findValidSections(lines []string, targetName string) ([]span, error) {
+	var sections []span
+
+	for i := 0; i < len(lines); i++ {
+		match := beginSectionRx.FindStringSubmatch(lines[i])
+		if match == nil {
+			// Check for orphaned END tags of target
+			if endMatch := endSectionRx.FindStringSubmatch(lines[i]); endMatch != nil && endMatch[1] == targetName {
+				return nil, fmt.Errorf("found orphaned closing tag for section '%s' at line %d", targetName, i+1)
+			}
+			continue
+		}
+
+		name := match[1]
+		endIdx := findEndTag(lines, i+1, name)
+
+		if endIdx != -1 {
+			sections = append(sections, span{i, endIdx, name})
+			i = endIdx // Advance outer loop
+		} else {
+			// Opening tag without closing tag
+			if name == targetName {
+				return nil, fmt.Errorf("found opening tag for section '%s' at line %d but no closing tag", name, i+1)
+			}
+			// Treat other malformed sections as raw text (safe fallback)
+		}
+	}
+	return sections, nil
+}
+
+// findEndTag looks ahead for the matching END tag.
+// It stops if it finds a nested BEGIN tag for the same name (which is considered broken/raw).
+func findEndTag(lines []string, startIdx int, name string) int {
+	for j := startIdx; j < len(lines); j++ {
+		endMatch := endSectionRx.FindStringSubmatch(lines[j])
+		if endMatch != nil && endMatch[1] == name {
+			return j
+		}
+		// Nested/Duplicate begin check
+		if beginMatch := beginSectionRx.FindStringSubmatch(lines[j]); beginMatch != nil && beginMatch[1] == name {
+			break
+		}
+	}
+	return -1
+}
+
+// splitLines breaks a byte slice into individual lines using the newline character.
+// If the input ends with a newline, the resulting trailing empty string is removed
+// to ensure the slice reflects actual lines of content.
+func splitLines(b []byte) []string {
+	lines := strings.Split(string(b), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // loadState reads the state from the provided reader.
@@ -1073,31 +1083,25 @@ func parseBlocks(lines []string, targetSectionName string) ([]chunk, error) {
 func loadState(r io.Reader) (map[string]struct{}, error) {
 	state := make(map[string]struct{})
 	scanner := bufio.NewScanner(r)
-
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
 			state[line] = struct{}{}
 		}
 	}
-
 	return state, scanner.Err()
 }
 
 // saveState writes the relative source paths to the locked state file.
 // It truncates the file before writing and ensures content is synced.
 func saveState(f *os.File, state map[string]struct{}) error {
-	// Truncate file to 0 size to overwrite content
 	if err := f.Truncate(0); err != nil {
 		return err
 	}
-
-	// Ensure we write from the beginning
 	if _, err := f.Seek(0, 0); err != nil {
 		return err
 	}
 
-	// Sort keys to prevent random file changes
 	keys := make([]string, 0, len(state))
 	for k := range state {
 		keys = append(keys, k)
@@ -1105,12 +1109,10 @@ func saveState(f *os.File, state map[string]struct{}) error {
 	sort.Strings(keys)
 
 	for _, srcPath := range keys {
-		line := fmt.Sprintf("%s\n", srcPath)
-		if _, err := f.WriteString(line); err != nil {
+		if _, err := fmt.Fprintf(f, "%s\n", srcPath); err != nil {
 			return err
 		}
 	}
-
 	// Flush writes to stable storage
 	return f.Sync()
 }
@@ -1118,14 +1120,16 @@ func saveState(f *os.File, state map[string]struct{}) error {
 // ensureStateOwnership attempts to set the ownership of the state file
 // to match the parent directory if the process is running as root.
 func ensureStateOwnership(f *os.File, path string) {
-	if os.Getuid() == 0 {
-		dir := filepath.Dir(path)
-		if info, err := os.Stat(dir); err == nil {
-			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-				// Best-effort attempt to change ownership. We ignore errors
-				// (e.g. filesystem quirks) to avoid blocking the sync operation.
-				_ = f.Chown(int(stat.Uid), int(stat.Gid))
-			}
-		}
+	if os.Getuid() != 0 {
+		return
+	}
+	dir := filepath.Dir(path)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		// Best-effort attempt to change ownership.
+		_ = f.Chown(int(stat.Uid), int(stat.Gid))
 	}
 }
