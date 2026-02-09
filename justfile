@@ -1,5 +1,5 @@
 prompt *args:
-  prompt-collect-files go.mod justfile README.md cmd/etcdotica/main.go {{args}}
+  prompt-collect-files go.mod justfile README.md cmd/etcdotica/*.go {{args}}
 
 static:
   CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o build/etcdotica ./cmd/etcdotica
