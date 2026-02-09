@@ -1,11 +1,11 @@
 prompt *args:
-  prompt-collect-files main.go README.md {{args}}
+  prompt-collect-files go.mod justfile README.md cmd/etcdotica/main.go {{args}}
 
 static:
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o etcdotica
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o build/etcdotica ./cmd/etcdotica
 
 local-install: static
-  sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin etcdotica
+  sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin build/etcdotica
 
 format:
   mdformat README.md
