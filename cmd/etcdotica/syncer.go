@@ -61,11 +61,16 @@ func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 		return err
 	}
 
-	if shouldSkip(relPath, info) {
-		if info.IsDir() {
-			return filepath.SkipDir
-		}
+	if relPath == "." {
 		return nil
+	}
+
+	if relPath == ".etcdotica" {
+		return nil
+	}
+
+	if info.IsDir() && info.Name() == ".git" {
+		return filepath.SkipDir
 	}
 
 	// Resolve Symlinks
@@ -84,20 +89,6 @@ func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 	}
 
 	return s.handleFile(path, relPath, realInfo)
-}
-
-// shouldSkip checks for .git, .etcdotica, or root dir.
-func shouldSkip(relPath string, info os.FileInfo) bool {
-	if relPath == "." {
-		return true
-	}
-	if relPath == ".etcdotica" {
-		return true
-	}
-	if info.IsDir() && info.Name() == ".git" {
-		return true
-	}
-	return false
 }
 
 // handleDirectory creates the directory at the destination.
