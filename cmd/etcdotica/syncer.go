@@ -61,10 +61,6 @@ func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 		return err
 	}
 
-	if relPath == "." {
-		return nil
-	}
-
 	if relPath == ".etcdotica" {
 		return nil
 	}
