@@ -5,6 +5,7 @@
 ### 🚀 Features
 
 - **One-Way Synchronization:** Mirrors the source directory to the destination directory.
+- **Bi-directional Collection:** Optionally copy newer files from the destination back to the source ("Collect Mode").
 - **Smart Updates:** Only copies files if the content (size/modification time) or permissions have changed.
 - **Managed Sections:** Merge content into existing files instead of overwriting them, using sections.
 - **Automatic Pruning:** Removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
@@ -89,9 +90,23 @@ To use `etcdotica`, run the binary. You must specify the source directory using 
 | `-src` | `string` | **Required.** Source directory containing your files. |
 | `-dst` | `string` | Destination directory (default: user home directory, or `/` if root). |
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
+| `-collect` | `bool` | Collect mode: Copy newer files from the destination back to the source. |
+| `-force` | `bool` | Force overwrite even if the destination file is newer than the source file. |
 | `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
 | `-umask` | `string` | Set process umask (octal, e.g. `022`). |
 | `-everyone` | `bool` | Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode. |
+| `-log-format` | `string` | Log output format: `human` (default), `text`, or `json`. |
+| `-log-level` | `string` | Log level: `debug`, `info`, `warn`, `error` (default: `info`). |
+
+#### Environment Variables
+
+Etcdotica also respects the following environment variables, which can be useful for containerized environments or scripts:
+
+| Variable | Description |
+| :--- | :--- |
+| `EDTC_LOG_LEVEL` | Sets the default log level (`debug`, `info`, `warn`, `error`). Overridden by `-log-level`. |
+| `EDTC_FORCE` | If set to `1` or `true`, enables force mode (equivalent to `-force`). |
+| `EDTC_COLLECT` | If set to `1` or `true`, enables collect mode (equivalent to `-collect`). |
 
 #### Examples
 
@@ -102,11 +117,11 @@ Apply changes from your dotfiles folder to your Home directory:
 etcdotica -src ~/my-dotfiles
 ```
 
-**2. Watch Mode**
-Keep the program running to verify changes live while editing configurations:
+**2. Watch Mode with JSON Logging**
+Keep the program running to verify changes live, outputting logs in JSON for processing:
 
 ```bash
-etcdotica -src ~/my-dotfiles -watch
+etcdotica -src ~/my-dotfiles -watch -log-format json
 ```
 
 **3. Executable Directories**
@@ -116,11 +131,11 @@ Ensure all files in `bin/` and `scripts/` have executable permissions set before
 etcdotica -src ~/my-dotfiles -bindir .local/bin -bindir scripts
 ```
 
-**4. Custom Source and Destination**
-Sync a specific configuration folder to a backup location:
+**4. Collect Mode**
+If you edited a config file directly in your home directory and want to save it back to your repo:
 
 ```bash
-etcdotica -src ./configs -dst /tmp/configs-backup
+etcdotica -src ~/my-dotfiles -collect
 ```
 
 **5. System Configuration (Root)**
@@ -136,6 +151,7 @@ sudo etcdotica -src ./etc-files -dst /etc -everyone
 
 1. **File Removal:** If you delete a file from your source directory, `etcdotica` detects its absence compared to the state file and removes the corresponding file from the destination.
 1. **Section Removal:** If you delete a section file (e.g., `etc/fstab.mounts-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
+1. **Root Ownership Fix:** If running as root (e.g., via `sudo`), `etcdotica` attempts to set the ownership of the `.etcdotica` state file to match the owner of the source directory. This prevents the state file from becoming locked to root, ensuring you can still modify your dotfiles repository as a standard user later.
 
 ### 🧩 Managed Sections
 
@@ -200,7 +216,7 @@ This means:
 
 ### Resilience & Fault Tolerance
 
-Beyond locking, the system is designed to handle environmental instability. If a source directory (such as a network drive) becomes unavailable during Watch Mode, etcdotica will not crash. Instead, it logs a warning and waits for the source to reappear before automatically resuming synchronization, provided the source was successfully located at least once during startup.
+- **Connection recovery:** If a source directory (such as a network drive) becomes unavailable during Watch Mode, `etcdotica` logs a warning and waits for the source to reappear, then automatically resumes synchronization, provided the source was successfully located at least once during startup.
 
 ### License
 
