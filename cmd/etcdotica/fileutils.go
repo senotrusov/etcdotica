@@ -23,11 +23,11 @@ import (
 	"time"
 )
 
-// installFile copies content and forces the specific calculated permissions.
+// syncFile copies content and forces the specific calculated permissions.
 // It optimizes by checking if content is already identical (size & bytes) to avoid writing.
 // It acquires an exclusive lock on the destination file during the operation.
-func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
-	logger.Debug("Installing file", "src", src, "dst", dst)
+func syncFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
+	logger.Debug("Syncing file", "src", src, "dst", dst)
 	s, err := os.Open(src)
 	if err != nil {
 		return err

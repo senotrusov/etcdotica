@@ -143,7 +143,9 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 
 	// Watch optimization for standard files: skip processing if the source metadata
 	// matches our cache and the file was already successfully recorded in the state.
-	if s.checkCache(srcPath, info) {
+	// We disable this optimization if Collect mode is active, as we must check
+	// the destination file's timestamp every cycle to detect newer files to collect.
+	if !s.cfg.Collect && s.checkCache(srcPath, info) {
 		if _, ok := s.oldState[relPath]; ok {
 			s.newState[relPath] = struct{}{}
 			s.processedFiles[relPath] = true
@@ -154,22 +156,28 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 	s.processedFiles[relPath] = true
 	s.newState[relPath] = struct{}{}
 
-	expectedPerms := calculatePerms(info.Mode(), s.cfg.ProcessUmask, s.cfg.Everyone)
+	// Check if destination is newer than source and handle collect/force logic
+	if done, err := s.handleNewerDestination(srcPath, targetPath, info); err != nil {
+		logger.Error("Error checking destination timestamp", "path", targetPath, "err", err)
+		return nil
+	} else if done {
+		// Either collected or skipped due to newer file
+		return nil
+	}
 
-	// If destination file differs, perform a full reinstall/update.
-	// This is safer than separate checks (like a standalone chmod) as it mitigates TOCTOU.
+	// Normal sync path
+	// On error, invalidate cache so we retry this file on the next watch cycle
+	expectedPerms := calculatePerms(info.Mode(), s.cfg.ProcessUmask, s.cfg.Everyone)
 	shouldUpdate, err := s.needsUpdate(targetPath, info, expectedPerms)
 	if err != nil {
 		logger.Error("Error checking destination state", "path", targetPath, "err", err)
-		// On error, invalidate cache so we retry this file on the next watch cycle
 		delete(s.metaCache, srcPath)
 		return nil
 	}
 
 	if shouldUpdate {
-		if err := installFile(srcPath, targetPath, info, expectedPerms); err != nil {
-			logger.Error("Failed to update/install", "path", targetPath, "err", err)
-			// On error, invalidate cache so we retry this file on the next watch cycle
+		if err := syncFile(srcPath, targetPath, info, expectedPerms); err != nil {
+			logger.Error("Failed to update/sync", "path", targetPath, "err", err)
 			delete(s.metaCache, srcPath)
 		} else {
 			s.changed = true
@@ -177,6 +185,51 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 	}
 
 	return nil
+}
+
+// handleNewerDestination checks if the target file is newer than the source.
+// Returns (true, nil) if the operation is "done" (either collected or skipped).
+// Returns (false, nil) if the standard sync should proceed (force enabled or dst not newer).
+func (s *syncer) handleNewerDestination(srcPath, dstPath string, srcInfo os.FileInfo) (bool, error) {
+	// Use os.Stat (not Lstat) so we follow symlinks.
+	// If the destination is a symlink to a file, we want to check the timestamp
+	// of the actual file content, not the link itself.
+	dstInfo, err := os.Stat(dstPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // Dest missing or broken link, proceed to sync
+		}
+		return false, err
+	}
+
+	// Ensure we are comparing against a regular file (or symlink to one).
+	// We do not collect from directories or special devices.
+	// os.Stat has already dereferenced the symlink, so IsRegular() checks the target.
+	if !dstInfo.Mode().IsRegular() {
+		return false, nil
+	}
+
+	if dstInfo.ModTime().After(srcInfo.ModTime()) {
+		if s.cfg.Collect {
+			logger.Info("Collecting newer file from destination", "dst", dstPath, "src", srcPath)
+			// Reverse sync: Dst becomes Source, Src becomes Dest.
+			// We preserve the Source file's permissions (srcInfo.Mode()) to avoid mode drift in the repo.
+			// syncFile will read from dstPath; since it uses os.Open, it correctly reads the symlink target.
+			if err := syncFile(dstPath, srcPath, dstInfo, srcInfo.Mode()); err != nil {
+				return true, fmt.Errorf("collection failed: %v", err)
+			}
+			// Update meta cache for the source file since we just modified it
+			s.metaCache[srcPath] = fileMeta{ModTime: dstInfo.ModTime(), Size: dstInfo.Size(), Mode: srcInfo.Mode()}
+			return true, nil
+		}
+
+		if !s.cfg.Force {
+			logger.Warn("Skipping overwrite: destination is newer (use -force to overwrite)", "dst", dstPath)
+			return true, nil
+		}
+		// If Force is true, fall through to return false -> proceed to overwrite
+	}
+	return false, nil
 }
 
 // checkCache returns true if the file hasn't changed since last scan (Watch mode).
@@ -202,7 +255,7 @@ func (s *syncer) needsUpdate(dstPath string, srcInfo os.FileInfo, expectedPerms 
 	dstInfo, err := os.Lstat(dstPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return true, nil // Destination does not exist, install needed
+			return true, nil // Destination does not exist, sync needed
 		}
 		return false, err // Error accessing destination
 	}

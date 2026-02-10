@@ -41,6 +41,8 @@ func (s *stringArray) Set(value string) error {
 // Config holds command line configuration
 type Config struct {
 	Watch        bool
+	Force        bool
+	Collect      bool
 	BinDirs      []string
 	Everyone     bool
 	Src          string
@@ -101,6 +103,8 @@ func main() {
 // parseFlags handles command line argument parsing and configuration setup.
 func parseFlags() Config {
 	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
+	forceFlag := flag.Bool("force", false, "Force overwrite even if destination is newer")
+	collectFlag := flag.Bool("collect", false, "Collect mode: copy newer files from destination back to source")
 	srcFlag := flag.String("src", "", "Source directory (required)")
 	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
@@ -124,14 +128,26 @@ func parseFlags() Config {
 	umask := setupUmask(*umaskFlag)
 	absSrc, absDst := resolvePaths(*srcFlag, *dstFlag)
 
+	// Consolidate flags with Environment Variables
+	force := *forceFlag || parseBoolEnv("EDTC_FORCE")
+	collect := *collectFlag || parseBoolEnv("EDTC_COLLECT")
+
 	return Config{
 		Watch:        *watchFlag,
+		Force:        force,
+		Collect:      collect,
 		Src:          absSrc,
 		Dst:          absDst,
 		BinDirs:      binDirs,
 		Everyone:     *everyoneFlag,
 		ProcessUmask: umask,
 	}
+}
+
+// parseBoolEnv checks an environment variable for "1" or "true".
+func parseBoolEnv(key string) bool {
+	val := strings.ToLower(os.Getenv(key))
+	return val == "1" || val == "true"
 }
 
 // resolvePaths determines absolute paths for source and destination.

@@ -132,7 +132,7 @@ sudo etcdotica -src ./etc-files -dst /etc -everyone
 
 ### 🔄 State & Pruning
 
-`etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully installed.
+`etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully synced.
 
 1. **File Removal:** If you delete a file from your source directory, `etcdotica` detects its absence compared to the state file and removes the corresponding file from the destination.
 1. **Section Removal:** If you delete a section file (e.g., `etc/fstab.mounts-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
