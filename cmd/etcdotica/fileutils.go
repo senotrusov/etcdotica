@@ -24,8 +24,8 @@ import (
 )
 
 // installFile copies content and forces the specific calculated permissions.
-// It acquires an exclusive lock on the destination file during the write operation
-// to prevent concurrent modifications.
+// It optimizes by checking if content is already identical (size & bytes) to avoid writing.
+// It acquires an exclusive lock on the destination file during the operation.
 func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 	logger.Debug("Installing file", "src", src, "dst", dst)
 	s, err := os.Open(src)
@@ -39,11 +39,10 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 		return fmt.Errorf("locking source file: %v", err)
 	}
 
-	// 1. Create/Write file.
-	// We use O_WRONLY|O_CREATE but explicitly AVOID O_TRUNC here.
-	// If we used O_TRUNC, we might wipe the file while another process holds the lock
-	// but hasn't finished writing, or before we strictly own the lock.
-	d, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE, perm)
+	// 1. Open destination.
+	// We use O_RDWR|O_CREATE to allow reading for content comparison optimization.
+	// We explicitly AVOID O_TRUNC here to prevent wiping the file before we acquire the lock.
+	d, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE, perm)
 	if err != nil {
 		return err
 	}
@@ -54,16 +53,38 @@ func installFile(src, dst string, info os.FileInfo, perm os.FileMode) error {
 		return err
 	}
 
-	// 3. Truncate. Now that we possess the exclusive lock, it is safe to reset file size.
-	if err := d.Truncate(0); err != nil {
-		d.Close()
-		return err
+	// Optimization: Compare content if sizes match to avoid unnecessary writes.
+	var sameContent bool
+	if dInfo, err := d.Stat(); err == nil && dInfo.Size() == info.Size() {
+		if match, err := contentsEqual(s, d); err == nil && match {
+			sameContent = true
+			logger.Debug("Skipping copy: content identical", "path", dst)
+		}
+		// Reset source cursor for subsequent operations (copy or verify)
+		if _, err := s.Seek(0, 0); err != nil {
+			d.Close()
+			return fmt.Errorf("resetting source cursor: %v", err)
+		}
 	}
 
-	// 4. Copy Content
-	if _, err := io.Copy(d, s); err != nil {
-		d.Close()
-		return err
+	if !sameContent {
+		// 3. Truncate. Now that we possess the exclusive lock and confirmed content differs, it is safe to reset file size.
+		if err := d.Truncate(0); err != nil {
+			d.Close()
+			return err
+		}
+
+		// Reset destination cursor (it may have been advanced by contentsEqual)
+		if _, err := d.Seek(0, 0); err != nil {
+			d.Close()
+			return err
+		}
+
+		// 4. Copy Content
+		if _, err := io.Copy(d, s); err != nil {
+			d.Close()
+			return err
+		}
 	}
 
 	// 5. Sync Permissions
@@ -107,37 +128,47 @@ func verifyContent(src *os.File, dstPath string) error {
 		return fmt.Errorf("verify lock failed: %v", err)
 	}
 
+	match, err := contentsEqual(src, d)
+	if err != nil {
+		return fmt.Errorf("verify content check failed: %v", err)
+	}
+
+	if !match {
+		// Mismatch detected
+		logger.Warn("Content mismatch detected. Updating mtime to force sync.", "path", dstPath)
+		now := time.Now()
+		if err := os.Chtimes(dstPath, now, now); err != nil {
+			return fmt.Errorf("failed to update mtime after content mismatch: %v", err)
+		}
+	}
+	return nil
+}
+
+// contentsEqual compares two readers byte-by-byte.
+func contentsEqual(r1, r2 io.Reader) (bool, error) {
 	const chunkSize = 64 * 1024
-	srcBuf := make([]byte, chunkSize)
-	dstBuf := make([]byte, chunkSize)
+	buf1 := make([]byte, chunkSize)
+	buf2 := make([]byte, chunkSize)
 
 	for {
-		n1, err1 := src.Read(srcBuf)
-		n2, err2 := d.Read(dstBuf)
+		n1, err1 := r1.Read(buf1)
+		n2, err2 := r2.Read(buf2)
 
 		if err1 != nil || err2 != nil {
 			if err1 == io.EOF && err2 == io.EOF {
-				return nil // Files match
+				return true, nil // Files match
 			}
 			if err1 == io.EOF || err2 == io.EOF {
-				break // Mismatch (length differs)
+				return false, nil // Mismatch (length differs)
 			}
 			// Actual read error
-			return fmt.Errorf("verify read error: src=%v, dst=%v", err1, err2)
+			return false, fmt.Errorf("read error: src=%v, dst=%v", err1, err2)
 		}
 
-		if n1 != n2 || !bytes.Equal(srcBuf[:n1], dstBuf[:n2]) {
-			break // Mismatch (content differs)
+		if n1 != n2 || !bytes.Equal(buf1[:n1], buf2[:n2]) {
+			return false, nil // Mismatch (content differs)
 		}
 	}
-
-	// Mismatch detected
-	logger.Warn("Content mismatch detected. Updating mtime to force sync.", "path", dstPath)
-	now := time.Now()
-	if err := os.Chtimes(dstPath, now, now); err != nil {
-		return fmt.Errorf("failed to update mtime after content mismatch: %v", err)
-	}
-	return nil
 }
 
 // readLines reads a file and splits it into lines.
