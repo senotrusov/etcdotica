@@ -110,7 +110,12 @@ func parseFlags() Config {
 	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
 	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode.")
 	logFormat := flag.String("log-format", "human", "Log format: human, text or json")
-	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+
+	defaultLogLevel := "info"
+	if env := os.Getenv("EDTC_LOG_LEVEL"); env != "" {
+		defaultLogLevel = env
+	}
+	logLevel := flag.String("log-level", defaultLogLevel, "Log level: debug, info, warn, error")
 
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to the source directory in which all files will be ensured to have the executable bit set (can be repeated)")
