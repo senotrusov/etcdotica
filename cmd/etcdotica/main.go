@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -59,6 +61,10 @@ type fileMeta struct {
 
 // Global configuration and logger setup
 var (
+	// Version is set during the build process via -ldflags.
+	// It defaults to "development" for local builds.
+	Version = "development"
+
 	logger *slog.Logger
 
 	// watchRetryInterval defines the duration the program waits between
@@ -87,6 +93,14 @@ var (
 func main() {
 	cfg := parseFlags()
 
+	// Create a context to handle graceful shutdown.
+	// This context is cancelled when a termination signal is received.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start the platform-specific lifecycle handler in a separate goroutine.
+	// This listens for OS signals (or Windows Service events) and calls cancel().
+	go HandleLifecycle(cancel)
+
 	// Initial validation: Source must exist and be a directory on startup.
 	// We only strictly require existence at start. Transient failures later
 	// (in watch mode) are handled in the loop.
@@ -97,29 +111,36 @@ func main() {
 
 	stateFilePath := filepath.Join(cfg.Src, ".etcdotica")
 
-	runLoop(cfg, stateFilePath)
+	runLoop(ctx, cfg, stateFilePath)
 }
 
 // parseFlags handles command line argument parsing and configuration setup.
 func parseFlags() Config {
-	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
-	forceFlag := flag.Bool("force", false, "Force overwrite even if destination is newer")
-	collectFlag := flag.Bool("collect", false, "Collect mode: copy newer files from destination back to source")
-	srcFlag := flag.String("src", "", "Source directory (required)")
-	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
-	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
-	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode.")
-	logFormat := flag.String("log-format", "human", "Log format: human, text or json")
-
 	defaultLogLevel := "info"
 	if env := os.Getenv("EDTC_LOG_LEVEL"); env != "" {
 		defaultLogLevel = env
 	}
-	logLevel := flag.String("log-level", defaultLogLevel, "Log level: debug, info, warn, error")
 
 	var binDirs stringArray
 	flag.Var(&binDirs, "bindir", "Directory relative to the source directory in which all files will be ensured to have the executable bit set (can be repeated)")
+
+	collectFlag := flag.Bool("collect", false, "Collect mode: copy newer files from destination back to source")
+	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
+	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode.")
+	forceFlag := flag.Bool("force", false, "Force overwrite even if destination is newer")
+	logFormat := flag.String("log-format", "human", "Log format: human, text or json")
+	logLevel := flag.String("log-level", defaultLogLevel, "Log level: debug, info, warn, error")
+	srcFlag := flag.String("src", "", "Source directory (required)")
+	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
+	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
+
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("etcdotica %s (%s)\n", Version, runtime.Version())
+		os.Exit(0)
+	}
 
 	setupLogger(*logFormat, *logLevel)
 
@@ -216,7 +237,7 @@ func getDefaultDest() string {
 }
 
 // runLoop executes the main synchronization loop.
-func runLoop(cfg Config, stateFilePath string) {
+func runLoop(ctx context.Context, cfg Config, stateFilePath string) {
 	// Cache stores metadata to detect changes in watch mode.
 	metaCache := make(map[string]fileMeta)
 
@@ -231,16 +252,32 @@ func runLoop(cfg Config, stateFilePath string) {
 	var iterationCount int
 
 	for {
-		success := syncIteration(cfg, stateFilePath, &cachedState, &cachedStateMeta, metaCache)
+		// hasPartialErrors: Non-fatal errors occurred on specific files/sections (sync continued).
+		hasPartialErrors := syncIteration(cfg, stateFilePath, &cachedState, &cachedStateMeta, metaCache)
 
 		if !cfg.Watch {
-			if !success {
-				os.Exit(1) // Standard practice: exit with error code in one-shot mode
+			if hasPartialErrors {
+				// Partial failure: Loop ran, but some files failed to sync.
+				logger.Error("Synchronization finished with partial errors")
+				os.Exit(2)
 			}
-			break
+			// Success
+			os.Exit(0)
 		}
 
-		time.Sleep(watchRetryInterval)
+		if hasPartialErrors {
+			// In watch mode, we log errors as transient and retry.
+			logger.Error("Transient error in watch mode; retrying")
+		}
+
+		// Wait logic: Sleep for the interval OR wake up immediately on shutdown signal.
+		select {
+		case <-ctx.Done():
+			logger.Info("Shutdown requested during wait. Exiting...")
+			return
+		case <-time.After(watchRetryInterval):
+			// Continue to next iteration
+		}
 
 		// Increment counter and check if we should drop the cache.
 		iterationCount++
@@ -256,7 +293,8 @@ func runLoop(cfg Config, stateFilePath string) {
 }
 
 // syncIteration performs a single pass of synchronization.
-// Returns true if successful (or recoverable), false if a fatal error occurred.
+// Returns:
+//   - partialErrors: True if individual file/section errors occurred during the pass.
 func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]struct{}, cachedStateMeta *fileMeta, metaCache map[string]fileMeta) bool {
 	logger.Debug("Starting sync iteration")
 
@@ -266,7 +304,7 @@ func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]str
 	stateFile, err := openAndLockState(stateFilePath)
 	if err != nil {
 		logger.Error("Error accessing state file", "err", err)
-		return false
+		return true
 	}
 	defer stateFile.Close() // Releases lock
 
@@ -286,10 +324,7 @@ func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]str
 
 	// Perform Sync
 	s := newSyncer(cfg, currentState, metaCache)
-	if err := s.run(); err != nil {
-		logger.Error("Sync error", "err", err)
-		return false
-	}
+	hasSyncErrors := s.run()
 
 	// Save State only if changes occurred.
 	// We do NOT update the cache here. If we wrote to the file, its mtime/size on disk has changed.
@@ -297,7 +332,9 @@ func syncIteration(cfg Config, stateFilePath string, cachedState *map[string]str
 	if s.changed {
 		if err := saveState(stateFile, s.newState); err != nil {
 			logger.Error("Error saving state", "err", err)
+			hasSyncErrors = true // Saving state is a critical part of the sync process
 		}
 	}
-	return true
+
+	return hasSyncErrors
 }

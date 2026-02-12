@@ -29,6 +29,7 @@ type syncer struct {
 	newState       map[string]struct{}
 	processedFiles map[string]bool
 	changed        bool
+	hasErrors      bool // Tracks if any file-scoped errors occurred during the run
 }
 
 func newSyncer(cfg Config, oldState map[string]struct{}, metaCache map[string]fileMeta) *syncer {
@@ -42,23 +43,32 @@ func newSyncer(cfg Config, oldState map[string]struct{}, metaCache map[string]fi
 }
 
 // run executes the sync logic: walk source, then prune orphans.
-func (s *syncer) run() error {
+// Returns true if partial errors occurred during the walk or prune.
+func (s *syncer) run() bool {
 	if err := filepath.Walk(s.cfg.Src, s.visit); err != nil {
-		return err
+		// If filepath.Walk returns an error, it means the walk was aborted
+		// (usually only happens if the root is inaccessible, as s.visit suppresses other errors).
+		logger.Error("Critical failure during source walk", "err", err)
+		s.hasErrors = true
 	}
 	s.prune()
-	return nil
+	return s.hasErrors
 }
 
 // visit is the filepath.Walk callback.
 func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 	if err != nil {
-		return err
+		// Log the error and set the error flag, but return nil to continue walking the rest of the tree.
+		logger.Error("Error accessing path during walk", "path", path, "err", err)
+		s.hasErrors = true
+		return nil
 	}
 
 	relPath, err := filepath.Rel(s.cfg.Src, path)
 	if err != nil {
-		return err
+		logger.Error("Failed to determine relative path", "path", path, "err", err)
+		s.hasErrors = true
+		return nil
 	}
 
 	if relPath == ".etcdotica" {
@@ -77,6 +87,7 @@ func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 		logger.Warn("Skipping unreadable file or broken link", "path", relPath, "err", err)
 		// Mark processed to prevent pruning on read error
 		s.processedFiles[relPath] = true
+		s.hasErrors = true
 		return nil
 	}
 
@@ -84,7 +95,12 @@ func (s *syncer) visit(path string, info os.FileInfo, err error) error {
 		return s.handleDirectory(relPath, realInfo)
 	}
 
-	return s.handleFile(path, relPath, realInfo)
+	// We treat errors in individual files as partial errors; we do not abort the walk.
+	if err := s.handleFile(path, relPath, realInfo); err != nil {
+		logger.Error("Failed to sync file", "path", relPath, "err", err)
+		s.hasErrors = true
+	}
+	return nil
 }
 
 // handleDirectory creates the directory at the destination.
@@ -96,7 +112,8 @@ func (s *syncer) handleDirectory(relPath string, info os.FileInfo) error {
 	// Note that we do not prune directories or modify permissions on existing ones.
 	if err := os.MkdirAll(targetPath, expectedPerms); err != nil {
 		logger.Warn("Skipping source directory: failed to create", "path", targetPath, "err", err)
-		return filepath.SkipDir
+		s.hasErrors = true
+		return filepath.SkipDir // Cannot walk into a directory we failed to create
 	}
 	return nil
 }
@@ -125,11 +142,16 @@ func (s *syncer) processSection(srcPath, relPath, targetRel, sectionName string,
 	}
 
 	logger.Debug("Processing section", "name", sectionName, "target", targetAbsPath)
+
 	didChange, err := mergeSection(srcPath, targetAbsPath, sectionName, info, s.cfg.ProcessUmask, s.cfg.Everyone)
+
 	if err != nil {
 		logger.Error("Failed to merge section", "section", sectionName, "target", targetAbsPath, "err", err)
+
 		// On error, invalidate cache so we retry this file on the next watch cycle
 		delete(s.metaCache, srcPath)
+
+		s.hasErrors = true
 	} else if didChange {
 		logger.Debug("Section merged and content changed", "target", targetAbsPath)
 		s.changed = true
@@ -159,6 +181,7 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 	// Check if destination is newer than source and handle collect/force logic
 	if done, err := s.handleNewerDestination(srcPath, targetPath, info); err != nil {
 		logger.Error("Error checking destination timestamp", "path", targetPath, "err", err)
+		s.hasErrors = true
 		return nil
 	} else if done {
 		// Either collected or skipped due to newer file
@@ -172,6 +195,7 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 	if err != nil {
 		logger.Error("Error checking destination state", "path", targetPath, "err", err)
 		delete(s.metaCache, srcPath)
+		s.hasErrors = true
 		return nil
 	}
 
@@ -179,6 +203,7 @@ func (s *syncer) processRegularFile(srcPath, relPath string, info os.FileInfo) e
 		if err := syncFile(srcPath, targetPath, info, expectedPerms); err != nil {
 			logger.Error("Failed to update/sync", "path", targetPath, "err", err)
 			delete(s.metaCache, srcPath)
+			s.hasErrors = true
 		} else {
 			s.changed = true
 		}
@@ -299,6 +324,7 @@ func (s *syncer) prune() {
 			switch {
 			case err != nil:
 				logger.Error("Failed to remove section", "section", section, "target", targetPath, "err", err)
+				s.hasErrors = true
 
 			case chg:
 				logger.Debug("Removed orphaned section", "section", section, "target", targetPath)
@@ -328,6 +354,7 @@ func (s *syncer) prune() {
 
 		default:
 			logger.Error("Failed to remove orphaned file", "file", targetPath, "err", err)
+			s.hasErrors = true
 		}
 
 	}
