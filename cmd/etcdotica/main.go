@@ -154,9 +154,16 @@ func parseFlags() Config {
 	umask := setupUmask(*umaskFlag)
 	absSrc, absDst := resolvePaths(*srcFlag, *dstFlag)
 
-	// Consolidate flags with Environment Variables
+	// Consolidate flags with Environment Variables.
+	// Force mode takes precedence over Collect mode. If Force is enabled, Collect
+	// is explicitly disabled to prevent the tool from attempting to pull and
+	// push the same file in a single cycle.
 	force := *forceFlag || parseBoolEnv("EDTC_FORCE")
-	collect := *collectFlag || parseBoolEnv("EDTC_COLLECT")
+	collect := (*collectFlag || parseBoolEnv("EDTC_COLLECT")) && !force
+
+	if force && (*collectFlag || parseBoolEnv("EDTC_COLLECT")) {
+		logger.Warn("Both force and collect modes were enabled; force takes precedence and collect has been disabled.")
+	}
 
 	return Config{
 		Watch:        *watchFlag,

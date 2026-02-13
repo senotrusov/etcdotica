@@ -93,8 +93,8 @@ To use `etcdotica`, run the binary. You must specify the source directory using 
 | `-src` | `string` | **Required.** Source directory containing your files. |
 | `-dst` | `string` | Destination directory (default: user home directory, or `/` if root). |
 | `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
-| `-collect` | `bool` | Collect mode: Copy newer files from the destination back to the source. |
-| `-force` | `bool` | Force overwrite even if the destination file is newer than the source file. |
+| `-collect` | `bool` | Collect mode: Copy newer files from the destination back to the source. **Ignored if `-force` is enabled.** |
+| `-force` | `bool` | Force overwrite even if the destination file is newer than the source file. **Overrides `-collect`.** |
 | `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
 | `-umask` | `string` | Set process umask (octal, e.g. `022`). |
 | `-everyone` | `bool` | Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode. |
@@ -108,8 +108,8 @@ Etcdotica also respects the following environment variables, which can be useful
 | Variable | Description |
 | :--- | :--- |
 | `EDTC_LOG_LEVEL` | Sets the default log level (`debug`, `info`, `warn`, `error`). Overridden by `-log-level`. |
-| `EDTC_FORCE` | If set to `1` or `true`, enables force mode (equivalent to `-force`). |
-| `EDTC_COLLECT` | If set to `1` or `true`, enables collect mode (equivalent to `-collect`). |
+| `EDTC_FORCE` | If set to `1` or `true`, enables force mode (equivalent to `-force`). Overrides collect mode. |
+| `EDTC_COLLECT` | If set to `1` or `true`, enables collect mode (equivalent to `-collect`). Ignored if force mode is enabled. |
 
 #### Examples
 
