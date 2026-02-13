@@ -70,22 +70,9 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o etcdotica
 - **Portability:** Works across different Linux distros (e.g., from Ubuntu to Alpine/musl).
 - **Smaller Size:** The `-s -w` flags strip debug information and the symbol table to reduce the file size.
 
-#### Cross-Compilation Recipe
-
-To build a static binary for a different architecture (e.g., building for a Raspberry Pi or a remote server from your local machine):
-
-| Target | Command |
-| :--- | :--- |
-| **Linux (64-bit)** | `CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o etcdotica-linux-amd64` |
-| **Linux (ARM64)** | `CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o etcdotica-linux-arm64` |
-| **macOS (Intel)** | `CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o etcdotica-darwin-amd64` |
-| **macOS (M1/M2)** | `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o etcdotica-darwin-arm64` |
-
 ### 🔍 Verifying the Build (Reproducibility)
 
 `etcdotica` supports **reproducible builds**. This means that two different people compiling the same version of the source code on different machines will produce a binary with the exact same internal **BuildID**.
-
-The `-trimpath` flag used in the build recipes above is essential for this; it strips local file system paths (e.g., `/home/user/etcdotica`) from the binary, ensuring the fingerprint is generated solely from the source code itself.
 
 To extract the unique fingerprint of your binary, use the Go toolchain:
 
