@@ -65,9 +65,10 @@ version := `
 format:
   mdformat README.md
 
-# Gather source context for LLM prompts
-context *args:
-  prompt-collect-files go.mod justfile README.md cmd/{{project}}/*.go {{args}}
+# Output key project file paths as shell-escaped strings for LLM prompt context
+context:
+  #!/usr/bin/env bash
+  printf "%q\n" go.mod justfile README.md cmd/{{project}}/*.go
 
 # Build and install the binary to /usr/local/bin
 install: build

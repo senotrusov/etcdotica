@@ -122,18 +122,18 @@ func parseFlags() Config {
 	}
 
 	var binDirs stringArray
-	flag.Var(&binDirs, "bindir", "Directory relative to the source directory in which all files will\nbe ensured to have the executable bit set (can be repeated)")
+	flag.Var(&binDirs, "bindir", "Directory relative to the source directory in which all files will\nbe ensured to have the executable bit set (can be repeated).")
 
-	collectFlag := flag.Bool("collect", false, "Collect mode: copy newer files from destination back to source")
-	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root)")
+	collectFlag := flag.Bool("collect", false, "Collect mode: copy newer files from destination back to source.\nIgnored if '-force' is enabled.")
+	dstFlag := flag.String("dst", "", "Destination directory (default: user home directory, or / if root).")
 	everyoneFlag := flag.Bool("everyone", false, "Set group and other permissions to the same permission bits as\nthe owner, then apply the umask to the resulting mode.")
-	forceFlag := flag.Bool("force", false, "Force overwrite even if destination is newer")
+	forceFlag := flag.Bool("force", false, "Force overwrite even if destination is newer. Overrides '-collect'.")
 	logFormat := flag.String("log-format", "human", "Log format: human, text or json")
 	logLevel := flag.String("log-level", defaultLogLevel, "Log level: debug, info, warn, error")
-	srcFlag := flag.String("src", "", "Source directory (required)")
-	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077)")
-	versionFlag := flag.Bool("version", false, "Print version information and exit")
-	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes")
+	srcFlag := flag.String("src", "", "Source directory (required).")
+	umaskFlag := flag.String("umask", "", "Set process umask (octal, e.g. 077).")
+	versionFlag := flag.Bool("version", false, "Print version information and exit.")
+	watchFlag := flag.Bool("watch", false, "Watch mode: scan continuously for changes.")
 
 	flag.Parse()
 

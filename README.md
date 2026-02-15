@@ -35,52 +35,26 @@
 
 ### 📦 Installation
 
-Since `etcdotica` is written in Go, you can easily install it if you have the Go toolchain configured:
+To install `etcdotica`, you need the [Go](https://go.dev/) toolchain and the [just](https://github.com/casey/just) command runner configured on your system.
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/senotrusov/etcdotica.git
-   cd etcdotica
+   git clone https://github.com/senotrusov/etcdotica.git && cd etcdotica
    ```
 1. **Install the binary:**
    ```bash
-   go install
+   just install
    ```
-   *(The `etcdotica` binary will be placed in your `$GOPATH/bin` or `$GOBIN`)*
+   *(This will compile the binary and perform a system-wide installation to `/usr/local/bin` using `sudo`)*
 
 ### ⚙️ Building for Development
 
-To compile the executable in the current directory for local testing or development:
+To compile the executable for local testing without installing it to the system:
 
 ```bash
-go build
+just build
 ```
-
-### 🔨 Static Compilation (Portability)
-
-If you want to create a single, portable binary that runs on any Linux distribution without requiring the Go toolchain or any shared C libraries (like `glibc`), use the following static build command:
-
-```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o etcdotica
-```
-
-#### Why use this?
-
-- **Zero Dependencies:** The resulting binary contains everything it needs to run.
-- **Portability:** Works across different Linux distros (e.g., from Ubuntu to Alpine/musl).
-- **Smaller Size:** The `-s -w` flags strip debug information and the symbol table to reduce the file size.
-
-### 🔍 Verifying the Build (Reproducibility)
-
-`etcdotica` supports **reproducible builds**. This means that two different people compiling the same version of the source code on different machines will produce a binary with the exact same internal **BuildID**.
-
-To extract the unique fingerprint of your binary, use the Go toolchain:
-
-```bash
-go tool buildid etcdotica
-```
-
-If your output matches the BuildID of an official release or a build from a colleague, you have verified that the binary was built from the exact same source code without any modifications or environment-specific interference.
+*(The resulting binary will be placed in the `./bin/` directory)*
 
 ### 💡 Usage
 
@@ -90,16 +64,18 @@ To use `etcdotica`, run the binary. You must specify the source directory using 
 
 | Flag | Type | Description |
 | :--- | :--- | :--- |
-| `-src` | `string` | **Required.** Source directory containing your files. |
-| `-dst` | `string` | Destination directory (default: user home directory, or `/` if root). |
-| `-watch` | `bool` | Enables watch mode. The program will run continuously, scanning for and syncing changes. |
-| `-collect` | `bool` | Collect mode: Copy newer files from the destination back to the source. **Ignored if `-force` is enabled.** |
-| `-force` | `bool` | Force overwrite even if the destination file is newer than the source file. **Overrides `-collect`.** |
-| `-bindir` | `string` | Specifies a directory relative to the source directory where files must be executable. Can be repeated. |
-| `-umask` | `string` | Set process umask (octal, e.g. `022`). |
+| `-bindir` | `string` | Directory relative to the source directory in which all files will be ensured to have the executable bit set (can be repeated). |
+| `-collect` | `bool` | Collect mode: copy newer files from destination back to source. Ignored if `-force` is enabled. |
+| `-dst` | `string` | Destination directory (default: user home directory, or / if root). |
 | `-everyone` | `bool` | Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode. |
-| `-log-format` | `string` | Log output format: `human` (default), `text`, or `json`. |
-| `-log-level` | `string` | Log level: `debug`, `info`, `warn`, `error` (default: `info`). |
+| `-force` | `bool` | Force overwrite even if destination is newer. Overrides `-collect`. |
+| `-help` | `bool` | Show help and usage information. |
+| `-log-format` | `string` | Log format: human, text or json (default "human"). |
+| `-log-level` | `string` | Log level: debug, info, warn, error (default "info"). |
+| `-src` | `string` | Source directory **(required)**. |
+| `-umask` | `string` | Set process umask (octal, e.g. 077). |
+| `-version` | `bool` | Print version information and exit. |
+| `-watch` | `bool` | Watch mode: scan continuously for changes. |
 
 #### Environment Variables
 
