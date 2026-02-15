@@ -13,7 +13,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ### 🧭 Rationale
 
-The core idea is disarmingly simple: keep a Git repository that mirrors the shape of your system. Files live in the repository exactly where they would live on the machine, with separate trees for user and system scope. A `home/.bashrc` in the repo corresponds to `~/.bashrc`, while something like `root/etc/fstab.external-disks-section` maps to its place under `/etc`.
+The core idea is simple: keep a Git repository that mirrors the shape of your system. Files live in the repository exactly where they would live on the machine, with separate trees for user and system scope. A `home/.bashrc` in the repo corresponds to `~/.bashrc`, while something like `root/etc/fstab.external-disks-section` maps to its place under `/etc`.
 
 You clone this repository once, for example into `~/.dotfiles`, and from that point on the tool becomes a careful courier between two worlds. When a file changes in the repository, it is applied to the system. When a file is edited directly on the system, it can be collected back into the repository. If a file disappears from the repository, it is pruned from the destination as well. The result is a tight, reversible feedback loop rather than a one-way dump of templates.
 
@@ -23,7 +23,7 @@ The same logic applies at different privilege levels. You can run the tool as a 
 
 There is also a bootstrap mode for fresh installations, where repository files are allowed to overwrite even newly created system files. This makes the first provisioning of a machine as trivial as cloning the repo and running a single command.
 
-The value lies in its restraint. It does not attempt to be a full configuration management framework. Instead, it performs a precise, bidirectional synchronization tuned specifically for dotfiles and small configuration artifacts, automated yet predictable, simple yet deliberate in the ways that matter.
+The value lies in its restraint. It does not attempt to be a full configuration management framework. Instead, it performs a precise, bidirectional synchronization tuned specifically for dotfiles and small configuration artifacts.
 
 ### 🔧 High-level example
 
