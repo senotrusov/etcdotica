@@ -64,7 +64,7 @@ sudo etcdotica \
 
 The `-bindir` option is a quality-of-life feature. Any file placed under the specified directory inside the repository is automatically marked executable when synced, so newly created helper scripts are immediately runnable without a manual `chmod`.
 
-To keep user files continuously synchronized, define a user systemd service at `home/.config/systemd/user/etcdotica.service`:
+To keep user files continuously synchronized, define a user systemd service at `~/.config/systemd/user/etcdotica.service`:
 
 ```ini
 [Unit]
@@ -92,6 +92,8 @@ systemctl --user enable --now etcdotica.service
 ```
 
 With this setup, editing any file in `~/.dotfiles/home` is immediately reflected in your home directory, while still allowing changes made directly on the system to be collected back into the repository.
+
+You can place the service unit file in your `~/.dotfiles` repository at `home/.config/systemd/user/etcdotica.service`, but you must do this before the first manual sync as described above, or simply rerun the sync.
 
 ### 🚀 Features
 
