@@ -1,17 +1,10 @@
 <!--
-  Copyright 2025-2026 Stanislav Senotrusov
+Copyright 2025-2026 Stanislav Senotrusov
 
-  Licensed under the Apache License, Version 2.0 (the "License");
-  you may not use this file except in compliance with the License.
-  You may obtain a copy of the License at
+This work is dual-licensed under the Apache License, Version 2.0 and the MIT License.
+See LICENSE-APACHE and LICENSE-MIT in the top-level directory for details.
 
-      http://www.apache.org/licenses/LICENSE-2.0
-
-  Unless required by applicable law or agreed to in writing, software
-  distributed under the License is distributed on an "AS IS" BASIS,
-  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  See the License for the specific language governing permissions and
-  limitations under the License.
+SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 ## etcdotica
@@ -47,13 +40,14 @@ To install `etcdotica`, you need the [Go](https://go.dev/) toolchain and the [ju
    ```
    *(This will compile the binary and perform a system-wide installation to `/usr/local/bin` using `sudo`)*
 
-### ⚙️ Building for Development
+### ⚙️ Building for development
 
 To compile the executable for local testing without installing it to the system:
 
 ```bash
 just build
 ```
+
 *(The resulting binary will be placed in the `./bin/` directory)*
 
 ### 💡 Usage
@@ -77,7 +71,7 @@ To use `etcdotica`, run the binary. You must specify the source directory using 
 | `-version` | `bool` | Print version information and exit. |
 | `-watch` | `bool` | Watch mode: scan continuously for changes. |
 
-#### Environment Variables
+#### Environment variables
 
 Etcdotica also respects the following environment variables, which can be useful for containerized environments or scripts:
 
@@ -124,7 +118,7 @@ Sync configurations to `/etc` ensuring they are readable by all users:
 sudo etcdotica -src ./etc-files -dst /etc -everyone
 ```
 
-### 🔄 State & Pruning
+### 🔄 State & pruning
 
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully synced.
 
@@ -132,11 +126,11 @@ sudo etcdotica -src ./etc-files -dst /etc -everyone
 1. **Section Removal:** If you delete a section file (e.g., `etc/fstab.mounts-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
 1. **Root Ownership Fix:** If running as root (e.g., via `sudo`), `etcdotica` attempts to set the ownership of the `.etcdotica` state file to match the owner of the source directory. This prevents the state file from becoming locked to root, ensuring you can still modify your dotfiles repository as a standard user later.
 
-### 🧩 Managed Sections
+### 🧩 Managed sections
 
 `etcdotica` supports a special "section" mode that allows you to manage parts of a file without owning the entire file. This is useful for shared system files like `/etc/fstab` or `/etc/hosts`.
 
-#### Naming Convention
+#### Naming convention
 
 To use this feature, name your source file using the pattern: `filename.{section-name}-section`.
 
@@ -157,14 +151,14 @@ The content of the source file is wrapped in `# BEGIN` and `# END` markers and i
    - If other sections exist, the new section is inserted in its correct alphabetical position relative to other blocks.
 1. **Preservation:** All text outside of `# BEGIN` / `# END` blocks is preserved exactly as it is.
 
-#### Safety and Validation
+#### Safety and validation
 
 To prevent data loss or corruption, `etcdotica` performs safety checks on the destination file:
 
 - **Orphaned Tags:** If the target file contains a `# BEGIN` or `# END` tag that matches your section name but is missing its counterpart (e.g., a start tag with no end tag), **`etcdotica` will stop and refuse to modify the file**.
 - **Unrelated Tags:** Malformed tags for sections with *different* names are ignored and treated as raw text to avoid interference with existing file content.
 
-### 🔗 Symlink Behavior at Destination
+### 🔗 Symlink behavior at destination
 
 To ensure safety and predictability, `etcdotica` follows specific rules when it encounters an existing symlink at the destination path:
 
@@ -173,7 +167,7 @@ To ensure safety and predictability, `etcdotica` follows specific rules when it 
 
 **Pruning Safety:** When the tool identifies an orphaned file at the destination that needs to be removed (because it no longer exists in the source), it uses a safe removal method. If that orphaned file is a symlink, only the symlink pointer itself is deleted; the file or directory it was pointing to remains untouched.
 
-### 🔒 Concurrency & Safety
+### 🔒 Concurrency & safety
 
 `etcdotica` is designed for robust operation. It uses **advisory file locking** (`flock`) on the destination files, section-managed files, and its own `.etcdotica` state file.
 
@@ -183,20 +177,26 @@ This means:
 - **Multiple Instances:** Multiple users or scripts can safely run `etcdotica` against the same destination or source simultaneously.
 - **Lock-guarded writes:** While it writes directly to files (to preserve Inodes and hardlinks), the exclusive lock ensures that no other process using standard locking will read a partially written file.
 
-### ⚠️ Direct Writes & Inode Stability
+### ⚠️ Direct writes & inode stability
 
-`etcdotica` writes directly to destination files instead of using a "write-to-temp and rename" strategy. This design prioritizes three factors:
+`etcdotica` writes directly to destination files instead of using a “write-to-temp and rename” strategy. This design prioritizes three factors:
 
-- **Avoiding Race Conditions:** Many directories are automatically scanned for configuration files. While some services use filters to ignore temporary files, this behavior is not universal. Direct writes ensure no auxiliary files are ever created, eliminating the risk of a service "double-loading" unintended configuration.
-- **Stable Inodes:** Writing in-place keeps the file's Inode constant. This preserves existing hardlinks and ensures active system watches (like `inotify`) remain attached to the file.
-- **Architectural Simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writeable location for these transients across varying mount points adds significant complexity that falls outside the scope of this tool.
+- **Stable inodes:** Writing in place keeps the file’s inode constant. This preserves existing hardlinks and ensures active system watches (such as `inotify`) remain attached to the file.
 
-**The Trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a **partially written** file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
+- **Architectural simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writable location for these transient files across varying mount points adds significant complexity that falls outside the scope of this tool for now. Choosing to create the temporary file in the same directory as the destination can introduce race conditions, because many directories are automatically scanned for configuration files and not all services reliably ignore temporary files.
 
-### Resilience & Fault Tolerance
+- **Limits of atomic writes across multiple files:** While an atomic write per file sounds appealing, many services load multiple configuration files, so they are still updated one by one, leaving intermediate states observable regardless of per-file atomicity.
 
-- **Connection recovery:** If a source directory (such as a network drive) becomes unavailable during Watch Mode, `etcdotica` logs a warning and waits for the source to reappear, then automatically resumes synchronization, provided the source was successfully located at least once during startup.
+- **Operational reality:** Most services, particularly under `/etc`, traditionally require an explicit reload or restart command to apply configuration changes, so direct writes are generally acceptable because changes are not picked up until the service is reloaded.
+
+- **Recovery from transient write failures:** In practice, a transient write failure can usually be resolved by simply re-running the command, which overwrites any partial writes and converges the system to the intended state.
+
+**The trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a partially written file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by “seeing” extra files in a managed directory.
+
+### Resilience & fault tolerance
+
+- **Source recovery:** If a source directory becomes unavailable during Watch Mode, possibly due to user actions or temporary network unavailability for remote drives, `etcdotica` logs a warning and waits for the source to reappear. Synchronization then resumes automatically, provided the source was successfully located at least once during startup.
 
 ### License
 
-`etcdotica` is licensed under the [Apache License 2.0](LICENSE).
+`etcdotica` is dual-licensed under the [Apache License, Version 2.0](LICENSE-APACHE) and the [MIT License](LICENSE-MIT). You can choose to use it under the terms of either license. By contributing, you agree to license your contributions under both licenses.
