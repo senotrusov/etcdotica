@@ -13,7 +13,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ### 🧭 Rationale
 
-The core idea is disarmingly simple: keep a Git repository that mirrors the shape of your system. Files live in the repository exactly where they would live on the machine, with separate trees for user and system scope. A `home/.bashrc` in the repo corresponds to `~/.bashrc`, while something like `root/etc/fstab.mounts-section` maps to its place under `/etc`.
+The core idea is disarmingly simple: keep a Git repository that mirrors the shape of your system. Files live in the repository exactly where they would live on the machine, with separate trees for user and system scope. A `home/.bashrc` in the repo corresponds to `~/.bashrc`, while something like `root/etc/fstab.external-disks-section` maps to its place under `/etc`.
 
 You clone this repository once, for example into `~/.dotfiles`, and from that point on the tool becomes a careful courier between two worlds. When a file changes in the repository, it is applied to the system. When a file is edited directly on the system, it can be collected back into the repository. If a file disappears from the repository, it is pruned from the destination as well. The result is a tight, reversible feedback loop rather than a one-way dump of templates.
 
@@ -156,8 +156,8 @@ To use `etcdotica`, run the binary. You must specify the source directory using 
 | `-everyone` | `bool` | Set group and other permissions to the same permission bits as the owner, then apply the umask to the resulting mode. |
 | `-force` | `bool` | Force overwrite even if destination is newer. Overrides `-collect`. |
 | `-help` | `bool` | Show help and usage information. |
-| `-log-format` | `string` | Log format: human, text or json (default "human"). |
-| `-log-level` | `string` | Log level: debug, info, warn, error (default "info"). |
+| <code>&#8209;log&#8209;format</code> | `string` | Log format: human, text or json (default "human"). |
+| <code>&#8209;log&#8209;level</code> | `string` | Log level: debug, info, warn, error (default "info"). |
 | `-src` | `string` | Source directory **(required)**. |
 | `-umask` | `string` | Set process umask (octal, e.g. 077). |
 | `-version` | `bool` | Print version information and exit. |
@@ -215,7 +215,7 @@ sudo etcdotica -src ./etc-files -dst /etc -everyone
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully synced.
 
 1. **File Removal:** If you delete a file from your source directory, `etcdotica` detects its absence compared to the state file and removes the corresponding file from the destination.
-1. **Section Removal:** If you delete a section file (e.g., `etc/fstab.mounts-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
+1. **Section Removal:** If you delete a section file (e.g., `etc/fstab.external-disks-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
 1. **Root Ownership Fix:** If running as root (e.g., via `sudo`), `etcdotica` attempts to set the ownership of the `.etcdotica` state file to match the owner of the source directory. This prevents the state file from becoming locked to root, ensuring you can still modify your dotfiles repository as a standard user later.
 
 ### 🧩 Managed sections
