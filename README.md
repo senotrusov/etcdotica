@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ## etcdotica
 
-**etcdotica** is a lightweight, zero-dependency tool written in Go to synchronize files from a source directory to a destination directory (defaulting to your home directory). It is designed to make managing dotfiles simple, idempotent, and consistent.
+**etcdotica** is a lightweight tool for synchronizing files between a source directory and a destination directory, with a focus on managing dotfiles and small configuration artifacts in a predictable, reversible way.
 
 ### 🧭 Rationale
 
