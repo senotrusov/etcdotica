@@ -11,6 +11,88 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 **etcdotica** is a lightweight, zero-dependency tool written in Go to synchronize files from a source directory to a destination directory (defaulting to your home directory). It is designed to make managing dotfiles simple, idempotent, and consistent.
 
+### 🧭 Rationale
+
+The core idea is disarmingly simple: keep a Git repository that mirrors the shape of your system. Files live in the repository exactly where they would live on the machine, with separate trees for user and system scope. A `home/.bashrc` in the repo corresponds to `~/.bashrc`, while something like `root/etc/fstab.mounts-section` maps to its place under `/etc`.
+
+You clone this repository once, for example into `~/.dotfiles`, and from that point on the tool becomes a careful courier between two worlds. When a file changes in the repository, it is applied to the system. When a file is edited directly on the system, it can be collected back into the repository. If a file disappears from the repository, it is pruned from the destination as well. The result is a tight, reversible feedback loop rather than a one-way dump of templates.
+
+Sometimes you do not want to own an entire file, only a fragment of it. For that, there are sections: named blocks that can be inserted into an existing file without disturbing the surrounding text. This makes it practical to maintain portable snippets, such as a block in `fstab` describing external disks that may be attached to any machine you use.
+
+The same logic applies at different privilege levels. You can run the tool as a regular user to manage your personal environment, or as root to curate system-wide configuration. In watch mode, it can sit quietly as a user-level systemd service, observing the repository and applying changes continuously. Editing a script or config then becomes a matter of modifying it in the repository and watching it materialize on the system almost instantly.
+
+There is also a bootstrap mode for fresh installations, where repository files are allowed to overwrite even newly created system files. This makes the first provisioning of a machine as trivial as cloning the repo and running a single command.
+
+The value lies in its restraint. It does not attempt to be a full configuration management framework. Instead, it performs a precise, bidirectional synchronization tuned specifically for dotfiles and small configuration artifacts, automated yet predictable, simple yet deliberate in the ways that matter.
+
+### 🔧 High-level example
+
+Assume your Git repository lives at `~/.dotfiles` and has the following structure:
+
+```text
+home/.bashrc
+home/.config/systemd/user/etcdotica.service
+root/etc/ssh/sshd_config.d/disable-password-authentication.conf # illustrative example
+root-only/root/.bashrc
+```
+
+You apply the repository files to the system in three passes, each using the appropriate privilege level and scope:
+
+```bash
+cd ~/.dotfiles
+
+# 1. User-level files under `home/`
+etcdotica \
+  -src home \
+  -bindir .local/bin \
+  -umask 077 \
+  -collect
+
+# 2. Root-owned files that must never be readable by unprivileged users
+sudo etcdotica \
+  -src root-only \
+  -umask 077 \
+  -collect
+
+# 3. System-wide configuration from `root/`, ensuring files are readable for all users
+sudo etcdotica \
+  -src root \
+  -bindir usr/local/bin \
+  -everyone \
+  -collect
+```
+
+The `-bindir` option is a quality-of-life feature. Any file placed under the specified directory inside the repository is automatically marked executable when synced, so newly created helper scripts are immediately runnable without a manual `chmod`.
+
+To keep user files continuously synchronized, define a user systemd service at `home/.config/systemd/user/etcdotica.service`:
+
+```ini
+[Unit]
+Description=Etcdotica
+ConditionPathExists=%h/.dotfiles
+
+[Service]
+Type=exec
+WorkingDirectory=%h/.dotfiles
+ExecStart=/usr/local/bin/etcdotica \
+  -src home \
+  -bindir .local/bin \
+  -umask 077 \
+  -collect \
+  -watch
+
+[Install]
+WantedBy=default.target
+```
+
+Enable and start the service:
+
+```bash
+systemctl --user enable --now etcdotica.service
+```
+
+With this setup, editing any file in `~/.dotfiles/home` is immediately reflected in your home directory, while still allowing changes made directly on the system to be collected back into the repository.
+
 ### 🚀 Features
 
 - **One-Way Synchronization:** Mirrors the source directory to the destination directory.
@@ -25,6 +107,16 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 - **Symlink Resolution:** Follows and resolves symlinks in the source directory before copying the actual content to the destination.
 - **Watch Mode:** Optionally watches the source directory for changes and syncs automatically. Handles transient unavailability of the source (e.g., if a mount point is temporarily disconnected).
 - **Clean:** Automatically ignores `.git` directories and its own state file.
+
+### 🖋️ What's in a name?
+
+**etcdotica** fuses the Unix `/etc` directory with the Italian term [**Ecdotica**](https://it.wikipedia.org/wiki/Ecdotica) (*ecdotics* in English). This scholarly discipline is devoted to reconciling divergent manuscript witnesses to produce a "critical edition", a definitive version of a text reconstructed from centuries of manual copying.
+
+The metaphor is deliberate. Curating a modern system is an editorial act. Most configurations are not authored once so much as they are transmitted: a tradition of inherited snippets from strangers and fragments of half-remembered internet threads that somehow survive a decade of migrations, reinstalls, and late-night edits.
+
+**etcdotica** is a small attempt at editorial hygiene for that tradition. It allows you to maintain your configuration in plain text and apply it convergently, without the need for an intermediate software layer that generates and applies your actual configuration.
+
+And despite how the name sounds, there is no distributed consensus here. It simply ensures that the transmission of your `.bashrc` across your personal digital history suffers fewer scribal errors.
 
 ### 📦 Installation
 
@@ -179,9 +271,9 @@ This means:
 
 ### ⚠️ Direct writes & inode stability
 
-`etcdotica` writes directly to destination files instead of using a “write-to-temp and rename” strategy. This design prioritizes three factors:
+`etcdotica` writes directly to destination files instead of using a "write-to-temp and rename" strategy. This design prioritizes three factors:
 
-- **Stable inodes:** Writing in place keeps the file’s inode constant. This preserves existing hardlinks and ensures active system watches (such as `inotify`) remain attached to the file.
+- **Stable inodes:** Writing in place keeps the file's inode constant. This preserves existing hardlinks and ensures active system watches (such as `inotify`) remain attached to the file.
 
 - **Architectural simplicity:** Performing a truly atomic rename requires placing the temporary file on the same filesystem as the destination. Reliably identifying a safe, writable location for these transient files across varying mount points adds significant complexity that falls outside the scope of this tool for now. Choosing to create the temporary file in the same directory as the destination can introduce race conditions, because many directories are automatically scanned for configuration files and not all services reliably ignore temporary files.
 
@@ -191,12 +283,12 @@ This means:
 
 - **Recovery from transient write failures:** In practice, a transient write failure can usually be resolved by simply re-running the command, which overwrites any partial writes and converges the system to the intended state.
 
-**The trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a partially written file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by “seeing” extra files in a managed directory.
+**The trade-off:** This approach introduces a millisecond-wide window where a service might attempt to read a partially written file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
 
-### Resilience & fault tolerance
+### 🛡️ Resilience & fault tolerance
 
 - **Source recovery:** If a source directory becomes unavailable during Watch Mode, possibly due to user actions or temporary network unavailability for remote drives, `etcdotica` logs a warning and waits for the source to reappear. Synchronization then resumes automatically, provided the source was successfully located at least once during startup.
 
-### License
+### 📄 License
 
 `etcdotica` is dual-licensed under the [Apache License, Version 2.0](LICENSE-APACHE) and the [MIT License](LICENSE-MIT). You can choose to use it under the terms of either license. By contributing, you agree to license your contributions under both licenses.

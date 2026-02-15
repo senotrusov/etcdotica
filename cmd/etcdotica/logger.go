@@ -38,7 +38,7 @@ func setupLogger(format, levelStr string) {
 	slog.SetDefault(logger)
 }
 
-// If you need to change log levels at runtime, use Go’s built-in slog.LevelVar:
+// If you need to change log levels at runtime, use Go's built-in slog.LevelVar:
 //
 // type humanHandler struct {
 //     level slog.Leveler // Use Leveler interface instead of Level
