@@ -43,9 +43,9 @@ For fresh installations, the tool can be configured to prioritize repository fil
 
 For large system files where you only need to manage specific lines, such as a mount point in `/etc/fstab` or entries in `/etc/hosts`, `etcdotica` supports **sections**. This allows you to maintain unique configuration snippets without taking ownership of the entire system-generated file.
 
-#### Flexible authority
+#### Flexible scope and privileges
 
-You define the scope and privilege level. By specifying the source and destination directories, you can run `etcdotica` as a standard user for dotfiles or as root for system-wide configurations.
+`etcdotica` does not assume any fixed layout or ownership model. You map source directories to destination paths directly and run it with whatever privileges the target requires. This makes the scope entirely opt-in: you can manage a full dotfiles tree or just a handful of files, and apply the same pattern to system configuration without taking ownership of unrelated parts of the filesystem.
 
 ### 🔧 High-level example
 
