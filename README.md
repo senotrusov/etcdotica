@@ -289,7 +289,7 @@ This means:
 
 ### 🛡️ Resilience & fault tolerance
 
-- **Source recovery:** If a source directory becomes unavailable during Watch Mode, possibly due to user actions or temporary network unavailability for remote drives, `etcdotica` logs a warning and waits for the source to reappear. Synchronization then resumes automatically, provided the source was successfully located at least once during startup.
+**Source recovery:** If a source directory becomes unavailable during Watch Mode, possibly due to user actions or temporary network unavailability for remote drives, `etcdotica` logs a warning and waits for the source to reappear. Synchronization then resumes automatically, provided the source was successfully located at least once during startup.
 
 ### 📄 License
 
