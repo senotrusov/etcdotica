@@ -9,21 +9,43 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ## etcdotica
 
-**etcdotica** is a lightweight tool for synchronizing files between a source directory and a destination directory, with a focus on managing dotfiles and small configuration artifacts in a predictable, reversible way.
+**etcdotica** is a lightweight file-based overlay that synchronizes your system configuration with a Git repository. It treats your repository as a source of truth that casts a shadow onto your filesystem: only the specific paths you track are managed, while everything else remains undisturbed.
 
-### 🧭 Rationale
+This approach provides a predictable, reversible way to manage dotfiles and system artifacts without the need for heavy abstractions or an intermediate configuration layer.
 
-The core idea is simple: keep a Git repository that mirrors the shape of your system. Files live in the repository exactly where they would live on the machine, with separate trees for user and system scope. A `home/.bashrc` in the repo corresponds to `~/.bashrc`, while something like `root/etc/fstab.external-disks-section` maps to its place under `/etc`.
+### 📐 Design overview
 
-You clone this repository once, for example into `~/.dotfiles`, and from that point on the tool becomes a careful courier between two worlds. When a file changes in the repository, it is applied to the system. When a file is edited directly on the system, it can be collected back into the repository. If a file disappears from the repository, it is pruned from the destination as well. The result is a tight, reversible feedback loop rather than a one-way dump of templates.
+#### File-by-file overlay
 
-Sometimes you do not want to own an entire file, only a fragment of it. For that, there are sections: named blocks that can be inserted into an existing file without disturbing the surrounding text. This makes it practical to maintain portable snippets, such as a block in `fstab` describing external disks that may be attached to any machine you use.
+The tool operates with file-level granularity, treating your repository as a partial map of the system:
 
-The same logic applies at different privilege levels. You can run the tool as a regular user to manage your personal environment, or as root to curate system-wide configuration. In watch mode, it can sit quietly as a user-level systemd service, observing the repository and applying changes continuously. Editing a script or config then becomes a matter of modifying it in the repository and watching it materialize on the system almost instantly.
+- **Mirrored:** Any file in your source repository is synchronized to its corresponding system path.
+- **Undisturbed:** Files that exist on the system but are absent from the repository are ignored. `etcdotica` does not "own" your directories; it only manages the specific artifacts you explicitly track.
+- **Pruned:** Only files previously managed by `etcdotica` and subsequently deleted from the source are removed from the destination, tracked via a local state file.
 
-There is also a bootstrap mode for fresh installations, where repository files are allowed to overwrite even newly created system files. This makes the first provisioning of a machine as trivial as cloning the repo and running a single command.
+#### Predictable synchronization
 
-The value lies in its restraint. It does not attempt to be a full configuration management framework. Instead, it performs a precise, bidirectional synchronization tuned specifically for dotfiles and small configuration artifacts.
+The workflow prioritizes transparency. A file at `home/.bashrc` in your repo maps directly to `~/.bashrc`. There is no intermediate translation layer. The content in your editor is exactly what is written to the system.
+
+#### Bi-directional flow
+
+Configuration often happens "in the field." `etcdotica` supports a circular workflow:
+
+- **Sync:** Push changes from your repository to the system.
+- **Collect:** Pull local tweaks from the system back into your repository.
+- **Watch:** The tool can monitor your repository for changes and apply them instantly upon saving. If enabled, it can also collect system changes automatically.
+
+#### Rapid deployment
+
+For fresh installations, the tool can be configured to prioritize repository files over existing system defaults. This reduces machine provisioning to a simple process: clone your repository and run a single command to align the system with your saved state.
+
+#### Managed fragments
+
+For large system files where you only need to manage specific lines, such as a mount point in `/etc/fstab` or entries in `/etc/hosts`, `etcdotica` supports **sections**. This allows you to maintain unique configuration snippets without taking ownership of the entire system-generated file.
+
+#### Flexible authority
+
+You define the scope and privilege level. By specifying the source and destination directories, you can run `etcdotica` as a standard user for dotfiles or as root for system-wide configurations.
 
 ### 🔧 High-level example
 
