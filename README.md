@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ## etcdotica
 
-**etcdotica** is a lightweight file-based overlay that synchronizes your system configuration with a Git repository. It treats your repository as a source of truth that casts a shadow onto your filesystem: only the specific paths you track are managed, while everything else remains undisturbed.
+*etcdotica* is a lightweight file-based overlay that synchronizes your system configuration with a Git repository. It treats your repository as a source of truth that casts a shadow onto your filesystem: only the specific paths you track are managed, while everything else remains undisturbed.
 
 This approach provides a predictable, reversible way to manage dotfiles and system artifacts without the need for heavy abstractions or an intermediate configuration layer.
 
@@ -37,7 +37,7 @@ For fresh installations, the tool can be configured to prioritize repository fil
 
 #### Managed fragments
 
-For large system files where you only need to manage specific lines, such as a mount point in `/etc/fstab` or entries in `/etc/hosts`, `etcdotica` supports **sections**. This allows you to maintain unique configuration snippets without taking ownership of the entire system-generated file.
+For large system files where you only need to manage specific lines, such as a mount point in `/etc/fstab` or entries in `/etc/hosts`, `etcdotica` supports *sections*. This allows you to maintain unique configuration snippets without taking ownership of the entire system-generated file.
 
 #### Configurable scope and privileges
 
@@ -130,11 +130,11 @@ You can place the service unit file in your `~/.dotfiles` repository at `home/.c
 
 ### What's in a name?
 
-**etcdotica** fuses the Unix `/etc` directory with the Italian term [**Ecdotica**](https://it.wikipedia.org/wiki/Ecdotica) (*ecdotics* in English). This scholarly discipline is devoted to reconciling divergent manuscript witnesses to produce a "critical edition", a definitive version of a text reconstructed from centuries of manual copying.
+*etcdotica* fuses the Unix `/etc` directory with the Italian term [*Ecdotica*](https://it.wikipedia.org/wiki/Ecdotica) (*ecdotics* in English). This scholarly discipline is devoted to reconciling divergent manuscript witnesses to produce a "critical edition", a definitive version of a text reconstructed from centuries of manual copying.
 
 The metaphor is deliberate. Curating a modern system is an editorial act. Most configurations are not authored once so much as they are transmitted: a tradition of inherited snippets from strangers and fragments of half-remembered internet threads that somehow survive a decade of migrations, reinstalls, and late-night edits.
 
-**etcdotica** is a small attempt at editorial hygiene for that tradition. It allows you to maintain your configuration in plain text and apply it convergently, without the need for an intermediate software layer that generates and applies your actual configuration.
+*etcdotica* is a small attempt at editorial hygiene for that tradition. It allows you to maintain your configuration in plain text and apply it convergently, without the need for an intermediate software layer that generates and applies your actual configuration.
 
 And despite how the name sounds, there is no distributed consensus here. It simply ensures that the transmission of your `.bashrc` across your personal digital history suffers fewer scribal errors.
 
@@ -142,14 +142,18 @@ And despite how the name sounds, there is no distributed consensus here. It simp
 
 To install `etcdotica`, you need the [Go](https://go.dev/) toolchain and the [just](https://github.com/casey/just) command runner configured on your system.
 
-1. **Clone the repository:**
+1. Clone the repository:
+
    ```bash
    git clone https://github.com/senotrusov/etcdotica.git && cd etcdotica
    ```
-2. **Install the binary:**
+
+2. Install the binary:
+
    ```bash
    just install
    ```
+
    *(This will compile the binary and perform a system-wide installation to `/usr/local/bin` using `sudo`)*
 
 ### Building for development
@@ -178,7 +182,7 @@ To use `etcdotica`, run the binary. You must specify the source directory using 
 | `-help` | `bool` | Show help and usage information. |
 | `‑log‑format` | `string` | Log format: human, text or json (default "human"). |
 | `‑log‑level` | `string` | Log level: debug, info, warn, error (default "info"). |
-| `-src` | `string` | Source directory **(required)**. |
+| `-src` | `string` | Source directory (required). |
 | `-umask` | `string` | Set process umask (octal, e.g. 077). |
 | `-version` | `bool` | Print version information and exit. |
 | `-watch` | `bool` | Watch mode: scan continuously for changes. |
@@ -229,9 +233,9 @@ Etcdotica also respects the following environment variables, which can be useful
 
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully synced.
 
-1. If you delete **a file** from your source directory, `etcdotica` detects its absence compared to the state file and removes the corresponding file from the destination.
-2. If you delete **a section file** (e.g., `etc/fstab.external-disks-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
-3. If **running as root** (e.g., via `sudo`), `etcdotica` attempts to set the ownership of the `.etcdotica` state file to match the owner of the source directory. This prevents the state file from becoming locked to root, ensuring you can still modify your dotfiles repository as a standard user later.
+1. If you delete a file from your source directory, `etcdotica` detects its absence compared to the state file and removes the corresponding file from the destination.
+2. If you delete a section file (e.g., `etc/fstab.external-disks-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
+3. If running as root (e.g., via `sudo`), `etcdotica` attempts to set the ownership of the `.etcdotica` state file to match the owner of the source directory. This prevents the state file from becoming locked to root, ensuring you can still modify your dotfiles repository as a standard user later.
 
 ### Managed sections
 
@@ -261,7 +265,7 @@ The content of the source file is wrapped in `# BEGIN` and `# END` markers and i
 
 To prevent data loss or corruption, `etcdotica` performs safety checks on the destination file:
 
-- If the target file contains a `# BEGIN` or `# END` tag that matches your section name but is missing its counterpart (e.g., a start tag with no end tag), **`etcdotica` will stop and refuse to modify the file**.
+- If the target file contains a `# BEGIN` or `# END` tag that matches your section name but is missing its counterpart (e.g., a start tag with no end tag), `etcdotica` will stop and refuse to modify the file.
 - Malformed tags for sections with *different* names are ignored and treated as raw text to avoid interference with existing file content.
 
 ### Symlink behavior at destination
