@@ -7,41 +7,60 @@ See LICENSE-APACHE and LICENSE-MIT in the top-level directory for details.
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-## etcdotica
+## etcdotica: dotfiles and system config management
 
-*etcdotica* is a lightweight file-based overlay that synchronizes your system configuration with a Git repository. It treats your repository as a source of truth that casts a shadow onto your filesystem: only the specific paths you track are managed, while everything else remains undisturbed.
+*etcdotica* is a lightweight, file-based overlay that synchronizes your system configuration with a Git repository. It treats your repository as a source of truth that casts a shadow onto your filesystem: only the specific paths you track are managed, while everything else remains undisturbed.
 
-This approach provides a predictable, reversible way to manage dotfiles and system artifacts without the need for heavy abstractions or an intermediate configuration layer.
+This approach provides a predictable and reversible way to manage dotfiles and system artifacts without heavy abstractions or an intermediate configuration layer.
 
-### Design overview
+### Architecture overview
 
-#### File-by-file overlay
+#### Per-file overlay model
 
 The tool operates with file-level granularity, treating your repository as a partial map of the system:
 
-- Any file in your source repository is synchronized to its corresponding system path.
-- Files that exist on the system but are absent from the repository are ignored. `etcdotica` does not "own" your directories; it only manages the specific artifacts you explicitly track.
-- Only files previously managed by `etcdotica` and subsequently deleted from the source are removed from the destination, tracked via a local state file.
+- Any file in your source repository is synchronized to its corresponding system path. Files are copied only if content (size or modification time) or permissions have changed.
+- Files that exist on the system but are absent from the repository are ignored. `etcdotica` does not own your directories; it only manages the specific artifacts you explicitly track.
+- Only files previously managed by `etcdotica` and later deleted from the source are removed from the destination. This is tracked via a local `.etcdotica` state file.
 
-#### Bi-directional flow
+#### Bidirectional workflow
 
-Configuration often happens "in the field." `etcdotica` supports a circular workflow:
+Configuration often happens directly on the system. `etcdotica` supports a circular workflow:
 
 - Push changes from your repository to the system.
 - Pull local tweaks from the system back into your repository.
-- The tool can monitor your repository for changes and apply them instantly upon saving. If enabled, it can also collect system changes automatically.
 
-#### First-time setup
+#### Watch mode and safe concurrency
 
-For fresh installations, the tool can be configured to prioritize repository files over existing system defaults. This reduces machine provisioning to a simple process: clone your repository and run a single command to align the system with your saved state.
+The tool can monitor the source directory for changes and apply them instantly when files are saved. If enabled, it can also collect system-side changes automatically.
 
-#### Managed fragments
+It uses advisory file locking (`flock`) to ensure multiple instances can run safely without corrupting files or state. For example, you can run one instance in watch mode while another runs as part of a periodic deployment script.
 
-For large system files where you only need to manage specific lines, such as a mount point in `/etc/fstab` or entries in `/etc/hosts`, `etcdotica` supports *sections*. This allows you to maintain unique configuration snippets without taking ownership of the entire system-generated file.
+#### Initial provisioning
 
-#### Configurable scope and privileges
+For fresh installations, the tool can prioritize repository files over existing system defaults. This reduces machine provisioning to a simple process: clone your repository and run a single command to align the system with your saved state.
+
+#### Section-based file management
+
+For large system files where only specific lines need to be managed, such as entries in `/etc/fstab` or `/etc/hosts`, `etcdotica` supports sections. This allows you to maintain unique configuration snippets without taking ownership of the entire system-generated file. Sections are updated as the source files change, and if a section file is deleted from the source, the corresponding section is automatically removed from the target file.
+
+#### Flexible scope and privilege model
 
 `etcdotica` does not assume any fixed layout or ownership model. You map source directories to destination paths directly and run it with whatever privileges the target requires. This makes the scope entirely opt-in: you can manage a full dotfiles tree or just a handful of files, and apply the same pattern to system configuration without taking ownership of unrelated parts of the filesystem.
+
+It applies the provided or user-default `umask` to ensure files are copied with secure permissions. It can optionally enforce world readability.
+
+It can also optionally ensure that all files within specified source directories (such as `bin/`) have executable bits set before syncing.
+
+### What's in a name?
+
+*etcdotica* fuses the Unix `/etc` directory with the Italian term [*Ecdotica*](https://it.wikipedia.org/wiki/Ecdotica) (*ecdotics* in English). This scholarly discipline is devoted to reconciling divergent manuscript witnesses to produce a "critical edition", a definitive version of a text reconstructed from centuries of manual copying.
+
+The metaphor is deliberate. Curating a modern system is an editorial act. Most configurations are not authored once so much as they are transmitted: a tradition of inherited snippets from strangers and fragments of half-remembered internet threads that somehow survive a decade of migrations, reinstalls, and late-night edits.
+
+*etcdotica* is a small attempt at editorial hygiene for that tradition. It allows you to maintain your configuration in plain text and apply it convergently, without the need for an intermediate software layer that generates and applies your actual configuration.
+
+And despite how the name sounds, there is no distributed consensus here. It simply ensures that the transmission of your `.bashrc` across your personal digital history suffers fewer scribal errors.
 
 ### High-level example
 
@@ -113,31 +132,6 @@ With this setup, editing any file in `~/.dotfiles/home` is immediately reflected
 
 You can place the service unit file in your `~/.dotfiles` repository at `home/.config/systemd/user/etcdotica.service`, but you must do this before the first manual sync as described above, or simply rerun the sync.
 
-### Features
-
-- Mirrors the source directory to the destination directory.
-- Optionally copy newer files from the destination back to the source ("Collect Mode").
-- Only copies files if the content (size/modification time) or permissions have changed.
-- Merge content into existing files instead of overwriting them, using sections.
-- Removes files from the destination if they are deleted from the source (tracked via a local `.etcdotica` state file).
-- If a section file is deleted from the source, the corresponding section is automatically removed from the target file.
-- Uses advisory file locking (`flock`) to ensure that multiple instances can run safely without corrupting files or the state.
-- Applies the system (or provided) `umask` to ensure files are copied with correct and secure permissions. Can optionally enforce world-readability.
-- Optionally scans specified directories (like `bin/`) and ensures all files within them have executable bits set before syncing, respecting system `umask`.
-- Follows and resolves symlinks in the source directory before copying the actual content to the destination.
-- Optionally watches the source directory for changes and syncs automatically. Handles transient unavailability of the source (e.g., if a mount point is temporarily disconnected).
-- Automatically ignores `.git` directories and its own state file.
-
-### What's in a name?
-
-*etcdotica* fuses the Unix `/etc` directory with the Italian term [*Ecdotica*](https://it.wikipedia.org/wiki/Ecdotica) (*ecdotics* in English). This scholarly discipline is devoted to reconciling divergent manuscript witnesses to produce a "critical edition", a definitive version of a text reconstructed from centuries of manual copying.
-
-The metaphor is deliberate. Curating a modern system is an editorial act. Most configurations are not authored once so much as they are transmitted: a tradition of inherited snippets from strangers and fragments of half-remembered internet threads that somehow survive a decade of migrations, reinstalls, and late-night edits.
-
-*etcdotica* is a small attempt at editorial hygiene for that tradition. It allows you to maintain your configuration in plain text and apply it convergently, without the need for an intermediate software layer that generates and applies your actual configuration.
-
-And despite how the name sounds, there is no distributed consensus here. It simply ensures that the transmission of your `.bashrc` across your personal digital history suffers fewer scribal errors.
-
 ### Installation
 
 To install `etcdotica`, you need the [Go](https://go.dev/) toolchain and the [just](https://github.com/casey/just) command runner configured on your system.
@@ -168,7 +162,11 @@ just build
 
 ### Usage
 
-To use `etcdotica`, run the binary. You must specify the source directory using the `-src` flag. By default, the program treats your home directory as the destination.
+To use `etcdotica`, run the binary. You must specify the source directory using the `-src` flag.
+
+You can optionally specify the destination using the `-dest` flag; by default, it uses the user’s home directory, or `/` when running as root.
+
+It automatically excludes `.git` directories and its own state file from synchronization.
 
 #### Options
 
