@@ -56,7 +56,7 @@ version := `
 
 # Format project files
 format:
-  mdformat README.md
+  mdformat --number README.md
 
 # Output key project file paths as shell-escaped strings for LLM prompt context
 context:
