@@ -253,11 +253,12 @@ To use this feature, name your source file using the pattern: `filename.{section
 
 The content of the source file is wrapped in `# BEGIN` and `# END` markers and inserted into the target file.
 
-1. If multiple sections exist in the target file, `etcdotica` sorts them alphabetically by their section name.
-2. - If a section with the same name already exists, its content is replaced.
-   - If no sections exist, the new section is appended to the end of the file.
-   - If other sections exist, the new section is inserted in its correct alphabetical position relative to other blocks.
-3. All text outside of `# BEGIN` / `# END` blocks is preserved exactly as it is.
+- If multiple sections exist in the target file, `etcdotica` sorts them alphabetically by their section name.
+- If a section with the same name already exists, its content is replaced.
+- If no sections exist, the new section is appended to the end of the file.
+- If other sections exist, the new section is inserted in its correct alphabetical position relative to other blocks.
+
+All text outside of `# BEGIN` / `# END` blocks is preserved exactly as it is.
 
 #### Safety and validation
 
