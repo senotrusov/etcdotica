@@ -13,7 +13,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 This approach provides a predictable, reversible way to manage dotfiles and system artifacts without the need for heavy abstractions or an intermediate configuration layer.
 
-### 📐 Design overview
+### Design overview
 
 #### File-by-file overlay
 
@@ -43,7 +43,7 @@ For large system files where you only need to manage specific lines, such as a m
 
 `etcdotica` does not assume any fixed layout or ownership model. You map source directories to destination paths directly and run it with whatever privileges the target requires. This makes the scope entirely opt-in: you can manage a full dotfiles tree or just a handful of files, and apply the same pattern to system configuration without taking ownership of unrelated parts of the filesystem.
 
-### 🔧 High-level example
+### High-level example
 
 Assume your Git repository lives at `~/.dotfiles` and has the following structure:
 
@@ -113,7 +113,7 @@ With this setup, editing any file in `~/.dotfiles/home` is immediately reflected
 
 You can place the service unit file in your `~/.dotfiles` repository at `home/.config/systemd/user/etcdotica.service`, but you must do this before the first manual sync as described above, or simply rerun the sync.
 
-### 🚀 Features
+### Features
 
 - Mirrors the source directory to the destination directory.
 - Optionally copy newer files from the destination back to the source ("Collect Mode").
@@ -128,7 +128,7 @@ You can place the service unit file in your `~/.dotfiles` repository at `home/.c
 - Optionally watches the source directory for changes and syncs automatically. Handles transient unavailability of the source (e.g., if a mount point is temporarily disconnected).
 - Automatically ignores `.git` directories and its own state file.
 
-### 🖋️ What's in a name?
+### What's in a name?
 
 **etcdotica** fuses the Unix `/etc` directory with the Italian term [**Ecdotica**](https://it.wikipedia.org/wiki/Ecdotica) (*ecdotics* in English). This scholarly discipline is devoted to reconciling divergent manuscript witnesses to produce a "critical edition", a definitive version of a text reconstructed from centuries of manual copying.
 
@@ -138,7 +138,7 @@ The metaphor is deliberate. Curating a modern system is an editorial act. Most c
 
 And despite how the name sounds, there is no distributed consensus here. It simply ensures that the transmission of your `.bashrc` across your personal digital history suffers fewer scribal errors.
 
-### 📦 Installation
+### Installation
 
 To install `etcdotica`, you need the [Go](https://go.dev/) toolchain and the [just](https://github.com/casey/just) command runner configured on your system.
 
@@ -152,7 +152,7 @@ To install `etcdotica`, you need the [Go](https://go.dev/) toolchain and the [ju
    ```
    *(This will compile the binary and perform a system-wide installation to `/usr/local/bin` using `sudo`)*
 
-### ⚙️ Building for development
+### Building for development
 
 To compile the executable for local testing without installing it to the system:
 
@@ -162,7 +162,7 @@ just build
 
 *(The resulting binary will be placed in the `./bin/` directory)*
 
-### 💡 Usage
+### Usage
 
 To use `etcdotica`, run the binary. You must specify the source directory using the `-src` flag. By default, the program treats your home directory as the destination.
 
@@ -225,7 +225,7 @@ Etcdotica also respects the following environment variables, which can be useful
    sudo etcdotica -src ./etc-files -dst /etc -everyone
    ```
 
-### 🔄 State & pruning
+### State & pruning
 
 `etcdotica` creates a hidden file named `.etcdotica` in your source directory. This file tracks every file and section successfully synced.
 
@@ -233,7 +233,7 @@ Etcdotica also respects the following environment variables, which can be useful
 2. If you delete **a section file** (e.g., `etc/fstab.external-disks-section`) from the source, `etcdotica` will automatically find the target file (`etc/fstab`) and remove only the block belonging to that specific section, leaving the rest of the file untouched.
 3. If **running as root** (e.g., via `sudo`), `etcdotica` attempts to set the ownership of the `.etcdotica` state file to match the owner of the source directory. This prevents the state file from becoming locked to root, ensuring you can still modify your dotfiles repository as a standard user later.
 
-### 🧩 Managed sections
+### Managed sections
 
 `etcdotica` supports a special "section" mode that allows you to manage parts of a file without owning the entire file. This is useful for shared system files like `/etc/fstab` or `/etc/hosts`.
 
@@ -264,7 +264,7 @@ To prevent data loss or corruption, `etcdotica` performs safety checks on the de
 - If the target file contains a `# BEGIN` or `# END` tag that matches your section name but is missing its counterpart (e.g., a start tag with no end tag), **`etcdotica` will stop and refuse to modify the file**.
 - Malformed tags for sections with *different* names are ignored and treated as raw text to avoid interference with existing file content.
 
-### 🔗 Symlink behavior at destination
+### Symlink behavior at destination
 
 To ensure safety and predictability, `etcdotica` follows specific rules when it encounters an existing symlink at the destination path:
 
@@ -273,7 +273,7 @@ To ensure safety and predictability, `etcdotica` follows specific rules when it 
 
 When the tool identifies an orphaned file at the destination that needs to be removed (because it no longer exists in the source), it uses a safe removal method. If that orphaned file is a symlink, only the symlink pointer itself is deleted; the file or directory it was pointing to remains untouched.
 
-### 🔒 Concurrency & safety
+### Concurrency & safety
 
 `etcdotica` is designed for robust operation. It uses advisory file locking (`flock`) on the destination files, section-managed files, and its own `.etcdotica` state file.
 
@@ -283,7 +283,7 @@ This means:
 - Multiple users or scripts can safely run `etcdotica` against the same destination or source simultaneously.
 - While it writes directly to files (to preserve Inodes and hardlinks), the exclusive lock ensures that no other process using standard locking will read a partially written file.
 
-### ⚠️ Direct writes & inode stability
+### Direct writes & inode stability
 
 `etcdotica` writes directly to destination files instead of using a "write-to-temp and rename" strategy. This design prioritizes three factors:
 
@@ -299,10 +299,10 @@ This means:
 
 This approach introduces a millisecond-wide window where a service might attempt to read a partially written file if that service does not respect file locks. This is a deliberate choice: in system configuration, a temporary partial read is generally safer and more predictable than the logic conflicts caused by "seeing" extra files in a managed directory.
 
-### 🛡️ Resilience & fault tolerance
+### Resilience & fault tolerance
 
 If a source directory becomes unavailable during Watch Mode, possibly due to user actions or temporary network unavailability for remote drives, `etcdotica` logs a warning and waits for the source to reappear. Synchronization then resumes automatically, provided the source was successfully located at least once during startup.
 
-### 📄 License
+### License
 
 `etcdotica` is dual-licensed under the [Apache License, Version 2.0](LICENSE-APACHE) and the [MIT License](LICENSE-MIT). You can choose to use it under the terms of either license. By contributing, you agree to license your contributions under both licenses.
