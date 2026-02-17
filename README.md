@@ -243,7 +243,7 @@ Etcdotica also respects the following environment variables, which can be useful
 
 To use this feature, name your source file using the pattern: `filename.{section-name}-section`.
 
-**Example:**
+##### Example
 
 - Source: `etc/fstab.external-disks-section`
 - Target: `etc/fstab`
@@ -270,8 +270,8 @@ To prevent data loss or corruption, `etcdotica` performs safety checks on the de
 
 To ensure safety and predictability, `etcdotica` follows specific rules when it encounters an existing symlink at the destination path:
 
-- If the source is a regular file but the destination is a symlink, `etcdotica` will **remove the symlink** and replace it with a standard file. This is a safety feature: it prevents the tool from accidentally overwriting the *contents* of a file located elsewhere on your system that the symlink might be pointing to.
-- If a destination path is a symlink that points to an existing directory, `etcdotica` will **preserve the symlink** and sync the source contents into the directory it points to. This allows you to transparently redirect entire configuration folders (such as symlinking `~/.config/app` to a different drive) while still allowing `etcdotica` to manage the files inside.
+- If the source is a regular file but the destination is a symlink, `etcdotica` will remove the symlink and replace it with a standard file. This is a safety feature: it prevents the tool from accidentally overwriting the *contents* of a file located elsewhere on your system that the symlink might be pointing to.
+- If a destination path is a symlink that points to an existing directory, `etcdotica` will preserve the symlink and sync the source contents into the directory it points to. This allows you to transparently redirect entire configuration folders (such as symlinking `~/.config/app` to a different drive) while still allowing `etcdotica` to manage the files inside.
 
 When the tool identifies an orphaned file at the destination that needs to be removed (because it no longer exists in the source), it uses a safe removal method. If that orphaned file is a symlink, only the symlink pointer itself is deleted; the file or directory it was pointing to remains untouched.
 
