@@ -29,7 +29,7 @@ version := `
   if [ -d .git ]; then
     tag=$(git describe --tags --always --dirty --broken) &&
     status=$(git status --porcelain) || {
-      echo "Error: Failed to obtain Git metadata." >&2
+      echo "Warning: Failed to obtain Git metadata." >&2
       echo "unknown"
       exit
     }
