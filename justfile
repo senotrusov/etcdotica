@@ -63,18 +63,10 @@ format:
 context:
   #!/usr/bin/env bash
   printf "%s\n" \
-    README.md \
-    go.mod \
     cmd/{{project}}/*.go \
-    justfile
-
-# Remove all build artifacts
-clean:
-  rm -rf ./dist ./bin
-
-# Remove dist artifacts
-clean-dist:
-  rm -rf ./dist
+    go.mod \
+    justfile \
+    README.md
 
 # Prepare a full release
 release: ensure-release-tag dist
@@ -294,3 +286,11 @@ cross-compile:
   target windows 386 .exe
   target windows amd64 .exe
   target windows arm64 .exe
+
+# Remove all build artifacts
+clean:
+  rm -rf ./dist ./bin
+
+# Remove dist artifacts
+clean-dist:
+  rm -rf ./dist
