@@ -56,21 +56,17 @@ version := `
 
 # Format project files
 format:
-  mdformat --number README.md
+  mdformat --number *.md
   rg "[^\x00-\x7F]" && true
 
 # Output key project file paths for LLM prompt context
 context:
   #!/usr/bin/env bash
-  printf "%s\n" go.mod justfile README.md cmd/{{project}}/*.go
-
-# Build and install the binary to /usr/local/bin
-install: build
-  sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin bin/{{project}}
-
-# Build the binary for the current OS/Arch
-build:
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version={{version}}" -o bin/{{project}} ./cmd/{{project}}
+  printf "%s\n" \
+    README.md \
+    go.mod \
+    cmd/{{project}}/*.go \
+    justfile
 
 # Remove all build artifacts
 clean:
@@ -226,6 +222,14 @@ archive-source:
     echo "Error: Failed to append VERSION file to the archive." >&2
     exit 1
   }
+
+# Build and install the binary to /usr/local/bin
+install: build
+  sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin bin/{{project}}
+
+# Build the binary for the current OS/Arch
+build:
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version={{version}}" -o bin/{{project}} ./cmd/{{project}}
 
 # Cross compile for all platforms
 cross-compile:
