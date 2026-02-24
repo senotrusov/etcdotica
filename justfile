@@ -57,11 +57,12 @@ version := `
 # Format project files
 format:
   mdformat --number README.md
+  rg "[^\x00-\x7F]" && true
 
-# Output key project file paths as shell-escaped strings for LLM prompt context
+# Output key project file paths for LLM prompt context
 context:
   #!/usr/bin/env bash
-  printf "%q\n" go.mod justfile README.md cmd/{{project}}/*.go
+  printf "%s\n" go.mod justfile README.md cmd/{{project}}/*.go
 
 # Build and install the binary to /usr/local/bin
 install: build
@@ -86,6 +87,7 @@ release: ensure-release-tag dist
 ensure-release-tag:
   #!/usr/bin/env sh
   set -u # Error on undefined variables
+
   # Get the current repository status to check for uncommitted changes
   status=$(git status --porcelain) || {
     echo "Error: Failed to obtain git status." >&2
@@ -129,7 +131,10 @@ dist: clean-dist cross-compile archive-source
   set -u # Error on undefined variables
 
   # Enter the distribution directory or exit if it doesn't exist
-  cd dist || { echo "Error: Could not change directory to dist" >&2; exit 1; }
+  cd dist || {
+    echo "Error: Could not change directory to dist" >&2
+    exit 1
+  }
 
   # Define a helper function to list files in a stable, null-terminated order
   each() {
@@ -172,8 +177,13 @@ dist: clean-dist cross-compile archive-source
 # Create a tarball of the source code
 archive-source:
   #!/usr/bin/env sh
+  set -u # Error on undefined variables
+
   # Ensure the distribution directory exists
-  mkdir -p dist
+  mkdir -p dist || {
+    echo "Error: Could not create directory 'dist'" >&2
+    exit 1
+  }
 
   # Check if the project is a git repository to determine if it's "dirty"
   if [ -d .git ]; then
@@ -184,7 +194,7 @@ archive-source:
     }
   else
     # Force local file archiving if not in a git repository
-    status=sweetheart
+    status=local
   fi
 
   # Define the target tarball path
@@ -220,14 +230,16 @@ archive-source:
 # Cross compile for all platforms
 cross-compile:
   #!/usr/bin/env sh
+  set -u # Error on undefined variables
+
   # https://pkg.go.dev/internal/platform
   # https://go.dev/doc/install/source#environment
-  set -u # Error on undefined variables
   target() {
     output="dist/{{project}}-{{version}}-$1-$2${3:-}"
     echo "Compiling $output" >&2
     GOOS="$1" GOARCH="$2" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version={{version}}" -o "$output" ./cmd/{{project}}
   }
+  
   # target aix ppc64
   # target android 386
   # target android amd64

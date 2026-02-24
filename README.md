@@ -164,7 +164,7 @@ just build
 
 To use `etcdotica`, run the binary. You must specify the source directory using the `-src` flag.
 
-You can optionally specify the destination using the `-dest` flag; by default, it uses the user’s home directory, or `/` when running as root.
+You can optionally specify the destination using the `-dest` flag; by default, it uses the user's home directory, or `/` when running as root.
 
 It automatically excludes `.git` directories and its own state file from synchronization.
 
