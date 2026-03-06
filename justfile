@@ -11,11 +11,12 @@ project := "etcdotica"
 # Retrieve the GPG signing key from the Git configuration if possible
 signingkey := `git config --get user.signingkey || true`
 
-# Resolve the version string from Git tags or a fallback VERSION file.
+# Resolve version from Git tags or fallback VERSION file.
+# Leading "v" is stripped.
 #
 # Output Formats:
-# - Exact tag: "v1.1.1"
-# - Commits since tag: "v1.1.1-4-gabc123" ('g' denotes Git hash)
+# - Tagged version: "1.1.1" (from tag "v1.1.1")
+# - Commits since tag: "v1.1.1-4-gabc123" (4 commits since tag, 'g' denotes Git hash)
 # - Uncommitted/untracked changes: Suffixes "-dirty"
 # - Repository errors: Suffixes "-broken"
 # - Fallback: "unknown"
@@ -27,7 +28,7 @@ version := `
 
   # Attempt to extract version from Git
   if [ -d .git ]; then
-    tag=$(git describe --tags --always --dirty --broken) &&
+    tag=$(git describe --tags --always --dirty --broken --match "v[0-9]*") &&
     status=$(git status --porcelain) || {
       echo "Warning: Failed to obtain Git metadata." >&2
       echo "unknown"
@@ -50,6 +51,9 @@ version := `
   if [ -z "${tag:-}" ]; then
     tag="unknown"
   fi
+
+  # Strip leading 'v'
+  tag="${tag#v}"
 
   printf "%s\n" "$tag"
 `
@@ -103,6 +107,9 @@ ensure-release-tag:
       exit 1
       ;;
   esac
+
+  # Strip leading 'v'
+  tag="${tag#v}"
 
   # Final verification: Does the strict annotated tag match our project version?
   # A mismatch here usually means the version variable is using a lightweight tag 
