@@ -58,20 +58,6 @@ version := `
   printf "%s\n" "$tag"
 `
 
-# Format project files
-format:
-  mdformat --number *.md
-  rg "[^\x00-\x7F]" && true
-
-# Output key project file paths for LLM prompt context
-context:
-  #!/usr/bin/env bash
-  printf "%s\n" \
-    cmd/{{project}}/*.go \
-    go.mod \
-    justfile \
-    README.md
-
 # Prepare a full release
 release: ensure-release-tag dist
 
@@ -136,8 +122,8 @@ dist: clean-dist cross-compile archive-source
     find . -maxdepth 1 -type f "$@" -printf '%f\0' | LC_ALL=C sort -z
   }
 
-  # Compress all files not already compressed using ultra zstd compression
-  each ! -name '*.zst' | xargs -0 --no-run-if-empty zstd --compress --ultra -20 --rm || {
+  # Compress all files not already compressed
+  each ! -name '*.zst' ! -name '*.zip' | xargs -0 --no-run-if-empty zstd --compress --ultra -20 --rm || {
     echo "Error: Zstd compression failed" >&2
     exit 1
   }
@@ -169,66 +155,9 @@ dist: clean-dist cross-compile archive-source
   # Sign the checksums file to ensure the authenticity of the release
   sign SHA256SUMS
 
-# Create a tarball of the source code
-archive-source:
-  #!/usr/bin/env sh
-  set -u # Error on undefined variables
-
-  # Ensure the distribution directory exists
-  mkdir -p dist || {
-    echo "Error: Could not create directory 'dist'" >&2
-    exit 1
-  }
-
-  # Check if the project is a git repository to determine if it's "dirty"
-  if [ -d .git ]; then
-    # Capture uncommitted changes
-    status=$(git status --porcelain) || {
-      echo "Error: Failed to obtain git status." >&2
-      exit 1
-    }
-  else
-    # Force local file archiving if not in a git repository
-    status=local
-  fi
-
-  # Define the target tarball path
-  tarfile="dist/{{project}}-{{version}}.tar"
-
-  # Choose archiving method based on repository state
-  if [ -n "$status" ]; then
-    echo "Creating archive from local files (uncommitted changes detected)..." >&2
-
-    # Create archive manually excluding build artifacts and git metadata
-    tar --exclude='./bin' --exclude='./.git' --exclude='./.gitignore' --exclude='./dist' --exclude='./VERSION' --transform='s,^\.,{{project}}-{{version}},' --create --file="$tarfile" . || {
-      echo "Error: Failed to create archive from local files." >&2
-      exit 1
-    }
-  else
-    echo "Creating archive from git HEAD (repository is clean)..." >&2
-
-    # Create archive using git's internal archiving tool
-    git archive --format=tar --prefix="{{project}}-{{version}}/" HEAD > "$tarfile" || {
-      echo "Error: Failed to create archive from git HEAD." >&2
-      exit 1
-    }
-  fi
-
-  # Append a version metadata file to the existing tarball
-  echo "{{version}}" > dist/VERSION && 
-  tar --transform='s,^dist,{{project}}-{{version}},' -rf "$tarfile" dist/VERSION &&
-  rm dist/VERSION || {
-    echo "Error: Failed to append VERSION file to the archive." >&2
-    exit 1
-  }
-
-# Build and install the binary to /usr/local/bin
-install: build
-  sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin bin/{{project}}
-
-# Build the binary for the current OS/Arch
-build:
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version={{version}}" -o bin/{{project}} ./cmd/{{project}}
+# Remove dist artifacts
+clean-dist:
+  rm -rf ./dist
 
 # Cross compile for all platforms
 cross-compile:
@@ -294,10 +223,81 @@ cross-compile:
   target windows amd64 .exe
   target windows arm64 .exe
 
+# Create a tarball of the source code
+archive-source:
+  #!/usr/bin/env sh
+  set -u # Error on undefined variables
+
+  # Ensure the distribution directory exists
+  mkdir -p dist || {
+    echo "Error: Could not create directory 'dist'" >&2
+    exit 1
+  }
+
+  # Check if the project is a git repository to determine if it's "dirty"
+  if [ -d .git ]; then
+    # Capture uncommitted changes
+    status=$(git status --porcelain) || {
+      echo "Error: Failed to obtain git status." >&2
+      exit 1
+    }
+  else
+    # Force local file archiving if not in a git repository
+    status=local
+  fi
+
+  # Define the target tarball path
+  tarfile="dist/{{project}}-{{version}}.tar"
+
+  # Choose archiving method based on repository state
+  if [ -n "$status" ]; then
+    echo "Creating archive from local files (uncommitted changes detected)..." >&2
+
+    # Create archive manually excluding build artifacts and git metadata
+    tar --exclude='./bin' --exclude='./.git' --exclude='./.gitignore' --exclude='./dist' --exclude='./VERSION' --transform='s,^\.,{{project}}-{{version}},' --create --file="$tarfile" . || {
+      echo "Error: Failed to create archive from local files." >&2
+      exit 1
+    }
+  else
+    echo "Creating archive from git HEAD (repository is clean)..." >&2
+
+    # Create archive using git's internal archiving tool
+    git archive --format=tar --prefix="{{project}}-{{version}}/" HEAD > "$tarfile" || {
+      echo "Error: Failed to create archive from git HEAD." >&2
+      exit 1
+    }
+  fi
+
+  # Append a version metadata file to the existing tarball
+  echo "{{version}}" > dist/VERSION && 
+  tar --transform='s,^dist,{{project}}-{{version}},' -rf "$tarfile" dist/VERSION &&
+  rm dist/VERSION || {
+    echo "Error: Failed to append VERSION file to the archive." >&2
+    exit 1
+  }
+
+# Build and install the binary to /usr/local/bin
+install: build
+  sudo install --compare --mode 0755 --owner root --group root --target-directory /usr/local/bin bin/{{project}}
+
+# Build the binary for the current OS/Arch
+build:
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version={{version}}" -o bin/{{project}} ./cmd/{{project}}
+
 # Remove all build artifacts
 clean:
-  rm -rf ./dist ./bin
+  rm -rf bin/{{project}}
 
-# Remove dist artifacts
-clean-dist:
-  rm -rf ./dist
+# Format project files
+format:
+  mdformat --number *.md
+  rg "[^\x00-\x7F]" && true
+
+# Output key project file paths for LLM prompt context
+context:
+  #!/usr/bin/env bash
+  printf "%s\n" \
+    cmd/{{project}}/*.go \
+    go.mod \
+    justfile \
+    README.md
