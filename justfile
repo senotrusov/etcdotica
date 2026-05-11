@@ -292,12 +292,3 @@ clean:
 format:
   mdformat --number *.md
   rg "[^\x00-\x7F]" && true
-
-# Output key project file paths for LLM prompt context
-context:
-  #!/usr/bin/env bash
-  printf "%s\n" \
-    cmd/{{project}}/*.go \
-    go.mod \
-    justfile \
-    README.md
