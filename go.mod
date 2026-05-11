@@ -5,7 +5,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-module etcdotica
+module github.com/senotrusov/etcdotica
 
 go 1.25.5
 
