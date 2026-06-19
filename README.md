@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 *etcdotica* is a lightweight, file-based overlay that synchronizes system configuration with a Git repository. It treats the repository as a source of truth that casts a shadow onto the filesystem: only tracked paths are managed, while everything else remains undisturbed.
 
-This approach provides a predictable, reversible way to manage dotfiles and system artifacts without heavy abstractions or an intermediate configuration layer.
+This approach keeps dotfile and system artifact management predictable and transparent by avoiding heavy abstractions and intermediate configuration layers.
 
 ### Architecture overview
 
